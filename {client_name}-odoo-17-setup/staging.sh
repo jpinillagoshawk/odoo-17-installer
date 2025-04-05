@@ -7,16 +7,33 @@ SERVER_IP={ip}
 BASE_PORT={odoo_port}
 LONGPOLLING_PORT=8072
 POSTGRES_PORT={db_port}
+GIT_CONFIG_FILE="$INSTALL_DIR/.git_config"
+MAIN_BRANCH="main"
+
+is_git_enabled() {
+    [ -f "$GIT_CONFIG_FILE" ]
+}
+
+load_git_config() {
+    if [ -f "$GIT_CONFIG_FILE" ]; then
+        source "$GIT_CONFIG_FILE"
+        return 0
+    else
+        return 1
+    fi
+}
 
 # Function to display usage
 usage() {
     echo "Usage: $0 [action] [name]"
     echo "Actions:"
     echo "  create [name]  - Create a new staging environment (name optional)"
+    echo "                   If git is enabled, will create a branch from main"
     echo "  list          - List all staging environments"
     echo "  start [name]  - Start a staging environment"
     echo "  stop [name]   - Stop a staging environment"
     echo "  delete [name] - Delete a staging environment"
+    echo "                   If git is enabled, will delete the branch too"
     echo "  update [name] - Update a staging environment from production"
     echo "  cleanup [name] - Clean up staging environment(s)"
     echo "                  Use 'all' to remove all staging environments"
@@ -99,6 +116,84 @@ get_ports() {
     return 1
 }
 
+copy_files() {
+    local name=$1
+    local source_dir=$INSTALL_DIR
+    local target_dir="$STAGING_DIR/$name"
+    
+    echo "Copying files..."
+    
+    for item in config enterprise docker-compose.yml; do
+        if [ -d "$source_dir/$item" ]; then
+            echo "  Copying directory: $item"
+            cp -r "$source_dir/$item" "$target_dir/"
+        else
+            echo "  Copying file: $item"
+            cp "$source_dir/$item" "$target_dir/"
+        fi
+    done
+    
+    if is_git_enabled && [ -d "$source_dir/addons/.git" ]; then
+        echo "  Setting up git-controlled addons..."
+        
+        mkdir -p "$target_dir/addons"
+        
+        cp -r "$source_dir/addons/." "$target_dir/addons/"
+        
+        local branch_name=""
+        if [ -f "$target_dir/.git_branch" ]; then
+            branch_name=$(cat "$target_dir/.git_branch")
+            
+            cd "$target_dir/addons"
+            git checkout "$branch_name" >/dev/null 2>&1
+        fi
+    else
+        if [ -d "$source_dir/addons" ]; then
+            echo "  Copying directory: addons"
+            cp -r "$source_dir/addons" "$target_dir/"
+        fi
+    fi
+}
+
+create_git_branch() {
+    local name=$1
+    local staging_dir="$STAGING_DIR/$name"
+    
+    if ! is_git_enabled; then
+        return 0
+    fi
+    
+    load_git_config
+    
+    echo "Checking git repository status..."
+    
+    cd "$INSTALL_DIR/addons"
+    
+    if [ ! -d ".git" ]; then
+        echo "Warning: addons directory is not a git repository. Skipping branch creation."
+        return 1
+    fi
+    
+    git checkout $MAIN_BRANCH
+    
+    local branch_name="staging-$name"
+    
+    if ! git show-ref --verify --quiet "refs/heads/$branch_name"; then
+        echo "Creating git branch '$branch_name' from '$MAIN_BRANCH'..."
+        git checkout -b "$branch_name" "$MAIN_BRANCH"
+    else
+        echo "Branch '$branch_name' already exists, checking it out..."
+        git checkout "$branch_name"
+    fi
+    
+    echo "$branch_name" > "$staging_dir/.git_branch"
+    
+    git checkout $MAIN_BRANCH
+    
+    echo "Git branch '$branch_name' created and associated with staging environment '$name'"
+    return 0
+}
+
 # Function to create staging
 create_staging() {
     local name=$1
@@ -141,17 +236,7 @@ create_staging() {
     echo "Creating staging environment '$name'..."
     mkdir -p "$STAGING_DIR/$name"
     
-    # Copy required files
-    echo "Copying files..."
-    for item in config enterprise addons docker-compose.yml; do
-        if [ -d "$INSTALL_DIR/$item" ]; then
-            echo "  Copying directory: $item"
-            cp -r "$INSTALL_DIR/$item" "$STAGING_DIR/$name/"
-        else
-            echo "  Copying file: $item"
-            cp "$INSTALL_DIR/$item" "$STAGING_DIR/$name/"
-        fi
-    done
+    copy_files "$name"
     
     # Update odoo.conf
     echo "Configuring odoo.conf..."
@@ -316,6 +401,8 @@ WHERE key = 'ribbon.name';" >/dev/null 2>&1
     docker-compose restart web
     sleep 5
 
+    create_git_branch "$name"
+
     echo "Staging environment created successfully:"
     echo "  Path: $STAGING_DIR/$name"
     echo "  Web port: $web_port (http://localhost:$web_port)"
@@ -402,6 +489,33 @@ stop_staging() {
     echo "Staging '$name' stopped successfully"
 }
 
+delete_git_branch() {
+    local name=$1
+    
+    if ! is_git_enabled; then
+        return 0
+    fi
+    
+    load_git_config
+    
+    if [ ! -f "$STAGING_DIR/$name/.git_branch" ]; then
+        echo "No git branch found for staging '$name'"
+        return 1
+    fi
+    
+    local branch_name=$(cat "$STAGING_DIR/$name/.git_branch")
+    
+    echo "Deleting git branch '$branch_name'..."
+    
+    cd "$INSTALL_DIR/addons"
+    
+    git checkout $MAIN_BRANCH
+    
+    git branch -D "$branch_name" 2>/dev/null || echo "Warning: Could not delete local branch"
+    
+    return 0
+}
+
 # Function to delete staging
 delete_staging() {
     local name=$1
@@ -412,6 +526,26 @@ delete_staging() {
     
     # Stop first
     stop_staging "$name"
+    
+    if is_git_enabled && [ -f "$STAGING_DIR/$name/.git_branch" ]; then
+        local branch_name=$(cat "$STAGING_DIR/$name/.git_branch")
+        cd "$INSTALL_DIR/addons"
+        
+        git checkout "$branch_name" 2>/dev/null
+        if ! git diff-index --quiet HEAD --; then
+            echo "Warning: There are uncommitted changes in branch '$branch_name'"
+            echo "These changes will be lost if you continue."
+            read -p "Continue with deletion? (y/N): " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "Deletion cancelled."
+                git checkout $MAIN_BRANCH
+                return 1
+            fi
+        fi
+        git checkout $MAIN_BRANCH
+    fi
+    
+    delete_git_branch "$name"
     
     # Remove directory
     echo "Deleting staging '$name'..."
@@ -624,4 +758,4 @@ case "$1" in
     *)
         usage
         ;;
-esac 
+esac          

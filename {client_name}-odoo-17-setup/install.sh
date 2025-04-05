@@ -12,7 +12,7 @@ if [ -t 1 ]; then
     BLINK="\033[5m"
     INVERT="\033[7m"
     RESET="\033[0m"
-    
+
     BLACK="\033[30m"
     RED="\033[31m"
     GREEN="\033[32m"
@@ -21,7 +21,7 @@ if [ -t 1 ]; then
     MAGENTA="\033[35m"
     CYAN="\033[36m"
     WHITE="\033[37m"
-    
+
     BG_BLACK="\033[40m"
     BG_RED="\033[41m"
     BG_GREEN="\033[42m"
@@ -38,7 +38,7 @@ else
     BLINK=""
     INVERT=""
     RESET=""
-    
+
     BLACK=""
     RED=""
     GREEN=""
@@ -47,7 +47,7 @@ else
     MAGENTA=""
     CYAN=""
     WHITE=""
-    
+
     BG_BLACK=""
     BG_RED=""
     BG_GREEN=""
@@ -66,7 +66,7 @@ TOTAL_STEPS=10  # Update this as needed
 INSTALL_DIR="/{client_name}-odoo-17"
 TEMP_LOG="/tmp/odoo_install.log"
 LOG_FILE="$INSTALL_DIR/logs/install.log"
-ODOO_ENTERPRISE_DEB="$INSTALL_DIR/odoo_17.0+e.latest_all.deb"
+ODOO_ENTERPRISE_DEB="./odoo_17.0+e.latest_all.deb"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 # Database and authentication constants
@@ -91,7 +91,7 @@ PORTS_IN_USE=""
 log() {
     local level=$1
     shift
-    
+
     case $level in
         INFO)    level_color="${GREEN}";;
         WARNING) level_color="${YELLOW}";;
@@ -99,7 +99,7 @@ log() {
         SUCCESS) level_color="${GREEN}${BOLD}";;
         *)       level_color="${RESET}";;
     esac
-    
+
     echo -e "${level_color}[$TIMESTAMP] [$level]${RESET} $*" | tee -a "$TEMP_LOG"
 }
 
@@ -128,22 +128,22 @@ spinner() {
 confirm() {
     local prompt=$1
     local default=${2:-Y}
-    
+
     if [ "$default" = "Y" ]; then
         local options="[Y/n]"
     else
         local options="[y/N]"
     fi
-    
+
     echo -e "${YELLOW}${BOLD}$prompt $options${RESET}"
     read -r response
-    
+
     if [ -z "$response" ]; then
         response=$default
     fi
-    
+
     case "$response" in
-        [yY][eE][sS]|[yY]) 
+        [yY][eE][sS]|[yY])
             return 0
             ;;
         *)
@@ -155,12 +155,12 @@ confirm() {
 # Display banner
 show_banner() {
     echo -e "${BG_BLUE}${WHITE}${BOLD}"
-    echo "  ___       _                   _  ____ "
-    echo " / _ \   __| |  ___    ___     / ||___/ "
-    echo "| | | | / _\` | / _ \  / _ \   / /    /  "
-    echo "| |_| || (_| || (_) || (_) | / /    /   "
-    echo " \___/  \__,_| \___/  \___/ /_/    /_   "
-    echo "                                        "
+    echo "  ___       _                   _  ______ "
+    echo " / _ \   __| |  ___    ___     / ||_____/ "
+    echo "| | | | / _\` | / _ \  / _ \   / /    / /  "
+    echo "| |_| || (_| || (_) || (_) | / /    / /   "
+    echo " \___/  \__,_| \___/  \___/ /_/    /_/    "
+    echo "                                          "
     echo -e "${RESET}"
     echo -e "${CYAN}${BOLD}Installation Script for {client_name}${RESET}"
     echo -e "${DIM}Created: $(date)${RESET}"
@@ -176,7 +176,7 @@ cleanup_on_error() {
     log ERROR "Installation failed, cleaning up..."
     echo -e "${BG_RED}${WHITE}${BOLD} INSTALLATION FAILED ${RESET}"
     echo -e "${RED}Check the log file at $LOG_FILE for details${RESET}"
-    
+
     if confirm "Would you like to clean up the partial installation?" "Y"; then
         cd "$INSTALL_DIR" 2>/dev/null || true
         docker-compose down -v 2>/dev/null || true
@@ -185,7 +185,7 @@ cleanup_on_error() {
     else
         echo -e "${YELLOW}Leaving partial installation in place.${RESET}"
     fi
-    
+
     exit 1
 }
 
@@ -194,7 +194,7 @@ validate() {
     local what=$1
     local check_cmd=$2
     local error_msg=$3
-    
+
     log INFO "Validating $what..."
     if ! eval "$check_cmd"; then
         log ERROR "$error_msg"
@@ -206,9 +206,9 @@ validate() {
 # Analyze system
 analyze_system() {
     show_progress "Analyzing System"
-    
+
     log INFO "Gathering system information..."
-    
+
     # OS Information
     if [ -f /etc/os-release ]; then
         source /etc/os-release
@@ -218,7 +218,7 @@ analyze_system() {
         SYS_OS="Unknown"
         log WARNING "Could not detect OS"
     fi
-    
+
     # Memory
     if command -v free >/dev/null 2>&1; then
         SYS_MEMORY=$(free -h | awk '/^Mem:/ {print $2}')
@@ -227,7 +227,7 @@ analyze_system() {
         SYS_MEMORY="Unknown"
         log WARNING "Could not detect system memory"
     fi
-    
+
     # CPU
     if [ -f /proc/cpuinfo ]; then
         SYS_CPU=$(grep -c "^processor" /proc/cpuinfo)
@@ -236,7 +236,7 @@ analyze_system() {
         SYS_CPU="Unknown"
         log WARNING "Could not detect CPU information"
     fi
-    
+
     # Disk Space
     if command -v df >/dev/null 2>&1; then
         SYS_DISK=$(df -h / | awk 'NR==2 {print $4}')
@@ -245,7 +245,7 @@ analyze_system() {
         SYS_DISK="Unknown"
         log WARNING "Could not detect disk space"
     fi
-    
+
     # Docker Version
     if command -v docker >/dev/null 2>&1; then
         DOCKER_VERSION=$(docker --version | cut -d' ' -f3 | tr -d ',')
@@ -258,7 +258,7 @@ analyze_system() {
         echo "Visit https://docs.docker.com/engine/install/ for installation instructions."
         exit 1
     fi
-    
+
     # Docker Compose Version
     if command -v docker-compose >/dev/null 2>&1; then
         DOCKER_COMPOSE_VERSION=$(docker-compose --version | cut -d' ' -f3 | tr -d ',')
@@ -274,7 +274,7 @@ analyze_system() {
         echo "Visit https://docs.docker.com/compose/install/ for installation instructions."
         exit 1
     fi
-    
+
     # Check existing containers
     EXISTING_CONTAINERS=$(docker ps -a --format "{{.Names}}" | grep -E "odoo|postgres" 2>/dev/null || echo "None")
     if [ "$EXISTING_CONTAINERS" != "None" ]; then
@@ -289,7 +289,7 @@ analyze_system() {
     else
         log INFO "No existing Odoo/Postgres containers found"
     fi
-    
+
     # Check ports in use
     PORTS_IN_USE=""
     if command -v netstat >/dev/null 2>&1; then
@@ -319,7 +319,7 @@ analyze_system() {
             log WARNING "Port 5432 is already in use"
         fi
     fi
-    
+
     if [ -n "$PORTS_IN_USE" ]; then
         echo -e "${YELLOW}${BOLD}Warning: The following ports are already in use: $PORTS_IN_USE${RESET}"
         echo -e "${YELLOW}This may prevent Odoo from starting properly.${RESET}"
@@ -342,13 +342,13 @@ show_summary() {
     echo -e "  ${BOLD}Disk Space:${RESET}      $SYS_DISK"
     echo -e "  ${BOLD}Docker:${RESET}          $DOCKER_VERSION"
     echo -e "  ${BOLD}Docker Compose:${RESET}  $DOCKER_COMPOSE_VERSION"
-    
+
     echo -e "\n${CYAN}${BOLD}Installation Details:${RESET}"
     echo -e "  ${BOLD}Client Name:${RESET}     {client_name}"
     echo -e "  ${BOLD}Install Directory:${RESET} $INSTALL_DIR"
     echo -e "  ${BOLD}Database:${RESET}        $DB_NAME"
     echo -e "  ${BOLD}Database User:${RESET}   $DB_USER"
-    
+
     echo -e "\n${CYAN}${BOLD}Actions to be performed:${RESET}"
     echo -e "  ${GREEN}✓${RESET} Create directory structure"
     echo -e "  ${GREEN}✓${RESET} Extract enterprise addons"
@@ -357,17 +357,17 @@ show_summary() {
     echo -e "  ${GREEN}✓${RESET} Configure SSL/HTTPS (if requested)"
     echo -e "  ${GREEN}✓${RESET} Start Docker containers"
     echo -e "  ${GREEN}✓${RESET} Initialize the database"
-    
+
     if [ -n "$PORTS_IN_USE" ]; then
         echo -e "\n${YELLOW}${BOLD}⚠ Warning: Ports in use:${RESET} $PORTS_IN_USE"
     fi
-    
+
     if [ "$EXISTING_CONTAINERS" != "None" ]; then
         echo -e "\n${YELLOW}${BOLD}⚠ Warning: Existing containers:${RESET} $EXISTING_CONTAINERS"
     fi
-    
+
     echo -e "\nInstallation log will be saved to: ${UNDERLINE}$LOG_FILE${RESET}\n"
-    
+
     if ! confirm "Do you want to proceed with the installation?"; then
         echo -e "${RED}Installation cancelled by user.${RESET}"
         exit 0
@@ -377,9 +377,9 @@ show_summary() {
 # Create directory structure
 create_directories() {
     show_progress "Creating Directory Structure"
-    
+
     log INFO "Creating directory structure..."
-    
+
     # Create all required directories with proper structure
     for dir in \
         config \
@@ -392,11 +392,11 @@ create_directories() {
         mkdir -p "$INSTALL_DIR/$dir"
         validate "$INSTALL_DIR/$dir directory" "[ -d '$INSTALL_DIR/$dir' ]" "Failed to create directory: $INSTALL_DIR/$dir"
     done
-    
+
     # Set correct ownership and permissions
     chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data" "$INSTALL_DIR/volumes/postgres-data" "$INSTALL_DIR/logs" 2>/dev/null || true
     chmod -R 777 "$INSTALL_DIR/volumes/odoo-data" "$INSTALL_DIR/volumes/postgres-data" "$INSTALL_DIR/logs"
-    
+
     # Move temporary log to final location
     mkdir -p "$(dirname "$LOG_FILE")"
     mv "$TEMP_LOG" "$LOG_FILE" 2>/dev/null || true
@@ -407,13 +407,13 @@ create_directories() {
 # Check prerequisites
 check_prerequisites() {
     show_progress "Checking Prerequisites"
-    
+
     log INFO "Checking prerequisites..."
-    
+
     # Check Docker
     validate "Docker installation" "command -v docker" "Docker is not installed"
     log INFO "Docker is installed: $(docker --version)"
-    
+
     # Check Docker Compose
     if command -v docker-compose &>/dev/null; then
         log INFO "Docker Compose is installed (standalone): $(docker-compose --version)"
@@ -423,13 +423,13 @@ check_prerequisites() {
         log ERROR "Docker Compose is not installed"
         exit 1
     fi
-    
+
     # Check user permissions
     if ! groups | grep -q docker; then
         log WARNING "Current user is not in docker group. You might need sudo for docker commands."
         echo -e "${YELLOW}${BOLD}Warning:${RESET} Current user is not in the docker group."
         echo -e "${YELLOW}You may need to use 'sudo' for docker commands, or add your user to the docker group.${RESET}"
-        
+
         if confirm "Do you want to add the current user to the docker group?"; then
             sudo usermod -aG docker $USER
             echo -e "${GREEN}User added to docker group. You may need to log out and log back in for this to take effect.${RESET}"
@@ -438,7 +438,7 @@ check_prerequisites() {
         log INFO "Current user is in docker group"
         echo -e "${GREEN}${BOLD}✓${RESET} User has proper Docker permissions"
     fi
-    
+
     # Check port availability
     if [ -z "$PORTS_IN_USE" ]; then
         log INFO "Required ports are available"
@@ -449,15 +449,15 @@ check_prerequisites() {
 # Extract enterprise addons
 extract_enterprise() {
     show_progress "Extracting Enterprise Addons"
-    
+
     log INFO "Extracting enterprise addons..."
-    
+
     if [ ! -f "$ODOO_ENTERPRISE_DEB" ]; then
         log WARNING "Enterprise DEB file not found: $ODOO_ENTERPRISE_DEB"
         echo -e "${YELLOW}${BOLD}⚠ Enterprise DEB file not found${RESET}"
         echo -e "${YELLOW}Please place the Odoo Enterprise .deb file at:${RESET}"
         echo -e "${UNDERLINE}$ODOO_ENTERPRISE_DEB${RESET}"
-        
+
         if confirm "Do you want to continue without enterprise addons?"; then
             log INFO "Continuing without enterprise addons"
             echo -e "${YELLOW}Continuing without enterprise addons. Community version will be used.${RESET}"
@@ -468,19 +468,16 @@ extract_enterprise() {
             exit 1
         fi
     fi
-    
+
     log INFO "Extracting enterprise addons from DEB file..."
     echo -e "${CYAN}Extracting enterprise addons...${RESET}"
-    
+
     local temp_dir=$(mktemp -d)
-    dpkg-deb -x "$ODOO_ENTERPRISE_DEB" "$temp_dir"
-    
-    # Validate extraction
-    if [ ! -d "$temp_dir/usr/lib/python3/dist-packages/odoo/addons" ]; then
-        log ERROR "Failed to extract enterprise addons"
-        echo -e "${RED}${BOLD}⚠ Failed to extract enterprise addons${RESET}"
+    if ! dpkg-deb -x "$ODOO_ENTERPRISE_DEB" "$temp_dir" 2>/dev/null; then
+        log ERROR "Failed to extract enterprise addons: Not a valid Debian package"
+        echo -e "${RED}${BOLD}⚠ Failed to extract enterprise addons: Not a valid Debian package${RESET}"
         rm -rf "$temp_dir"
-        
+
         if confirm "Do you want to continue without enterprise addons?"; then
             log INFO "Continuing without enterprise addons"
             echo -e "${YELLOW}Continuing without enterprise addons. Community version will be used.${RESET}"
@@ -491,11 +488,28 @@ extract_enterprise() {
             exit 1
         fi
     fi
-    
+
+    # Validate extraction
+    if [ ! -d "$temp_dir/usr/lib/python3/dist-packages/odoo/addons" ]; then
+        log ERROR "Failed to extract enterprise addons: Invalid package structure"
+        echo -e "${RED}${BOLD}⚠ Failed to extract enterprise addons: Invalid package structure${RESET}"
+        rm -rf "$temp_dir"
+
+        if confirm "Do you want to continue without enterprise addons?"; then
+            log INFO "Continuing without enterprise addons"
+            echo -e "${YELLOW}Continuing without enterprise addons. Community version will be used.${RESET}"
+            return 0
+        else
+            log ERROR "Installation cancelled: Failed to extract enterprise addons"
+            echo -e "${RED}Installation cancelled by user.${RESET}"
+            exit 1
+        fi
+    fi
+
     # Move enterprise addons
     mv "$temp_dir/usr/lib/python3/dist-packages/odoo/addons/"* "$INSTALL_DIR/enterprise/"
     rm -rf "$temp_dir"
-    
+
     # Validate move
     validate "Enterprise addons availability" "[ -n '$(ls -A $INSTALL_DIR/enterprise/)' ]" "Enterprise addons directory is empty"
     log INFO "Enterprise addons extracted successfully"
@@ -505,23 +519,26 @@ extract_enterprise() {
 # Create backup script
 create_backup_script() {
     show_progress "Setting Up Backup and Maintenance Scripts"
-    
+
     log INFO "Creating scripts..."
-    
+
     # Copy the existing backup script
     cp backup.sh "$INSTALL_DIR/backup.sh"
     chmod +x "$INSTALL_DIR/backup.sh"
-    
+
     # Copy staging script
     cp staging.sh "$INSTALL_DIR/staging.sh"
     chmod +x "$INSTALL_DIR/staging.sh"
-    
+
+    cp git_panel.sh "$INSTALL_DIR/git_panel.sh"
+    chmod +x "$INSTALL_DIR/git_panel.sh"
+
     # Copy SSL setup script if it exists
     if [ -f "ssl-setup.sh" ]; then
         cp ssl-setup.sh "$INSTALL_DIR/ssl-setup.sh"
         chmod +x "$INSTALL_DIR/ssl-setup.sh"
     fi
-    
+
     validate "scripts creation" "[ -x '$INSTALL_DIR/backup.sh' ]" "Failed to create scripts"
     log INFO "Scripts created successfully with proper permissions"
     echo -e "${GREEN}${BOLD}✓${RESET} Backup and maintenance scripts installed"
@@ -530,19 +547,19 @@ create_backup_script() {
 # Setup cron jobs for backup
 setup_cron() {
     log INFO "Setting up cron jobs for automated backups..."
-    
+
     # Check if cron entry already exists
     if crontab -l 2>/dev/null | grep -q "$INSTALL_DIR/backup.sh"; then
         log INFO "Cron job for backup already exists"
         echo -e "${YELLOW}Backup cron jobs already exist. Skipping...${RESET}"
         return 0
     fi
-    
+
     echo -e "${CYAN}Setting up daily and monthly backup cron jobs...${RESET}"
-    
+
     (crontab -l 2>/dev/null || true; echo "0 3 * * * $INSTALL_DIR/backup.sh backup daily") | crontab -
     (crontab -l 2>/dev/null || true; echo "0 2 1 * * $INSTALL_DIR/backup.sh backup monthly") | crontab -
-    
+
     validate "cron jobs" "crontab -l | grep -q backup.sh" "Failed to set up cron jobs"
     log INFO "Cron jobs set up successfully"
     echo -e "${GREEN}${BOLD}✓${RESET} Automated backup schedule configured"
@@ -551,9 +568,9 @@ setup_cron() {
 # Setup SSL configuration files
 setup_ssl_config() {
     show_progress "Setting Up SSL Configuration Files"
-    
+
     log INFO "Setting up SSL configuration files..."
-    
+
     # Copy SSL config template if it exists
     if [ -f "ssl-config.conf.template" ]; then
         cp ssl-config.conf.template "$INSTALL_DIR/ssl-config.conf.template"
@@ -563,33 +580,33 @@ setup_ssl_config() {
         log WARNING "SSL configuration template not found"
         echo -e "${YELLOW}SSL configuration template not found. SSL setup may be incomplete.${RESET}"
     fi
-    
+
     # Copy SSL README if it exists
     if [ -f "SSL-README.md" ]; then
         cp SSL-README.md "$INSTALL_DIR/SSL-README.md"
         log INFO "Copied SSL README"
     fi
-    
+
     # Copy direct SSL config if it exists
     if [ -f "direct-ssl-config.conf" ]; then
         cp direct-ssl-config.conf "$INSTALL_DIR/direct-ssl-config.conf"
         log INFO "Copied direct SSL configuration"
     fi
-    
+
     # Ask if we should create and set up SSL now
     if [ -f "ssl-config.conf.template" ] && [ -f "ssl-setup.sh" ]; then
         echo -e "${CYAN}${BOLD}SSL Configuration${RESET}"
         echo -e "${CYAN}Odoo can be configured with SSL/HTTPS for secure access.${RESET}"
-        
+
         if confirm "Do you want to set up SSL/HTTPS during installation?"; then
             # Copy template to actual config
             cp ssl-config.conf.template "$INSTALL_DIR/ssl-config.conf"
             log INFO "Created SSL configuration from template"
-            
+
             # Prompt for domain
             echo -e "${CYAN}Please enter the domain name for SSL:${RESET}"
             read -r ssl_domain
-            
+
             if [ -n "$ssl_domain" ]; then
                 # Update domain in config
                 sed -i "s/DOMAIN=example.com/DOMAIN=$ssl_domain/" "$INSTALL_DIR/ssl-config.conf"
@@ -600,11 +617,11 @@ setup_ssl_config() {
                 log WARNING "No domain provided for SSL configuration"
                 echo -e "${YELLOW}No domain provided. Using default values in SSL config.${RESET}"
             fi
-            
+
             # Prompt for email
             echo -e "${CYAN}Please enter the email for Let's Encrypt certificates:${RESET}"
             read -r ssl_email
-            
+
             if [ -n "$ssl_email" ]; then
                 # Update email in config
                 sed -i "s/CERT_EMAIL=admin@example.com/CERT_EMAIL=$ssl_email/" "$INSTALL_DIR/ssl-config.conf"
@@ -620,21 +637,21 @@ setup_ssl_config() {
             echo -e "${CYAN}$INSTALL_DIR/ssl-setup.sh${RESET}"
         fi
     fi
-    
+
     log INFO "SSL configuration files setup completed"
 }
 
 # Initialize database
 initialize_database() {
     show_progress "Initializing Odoo Database"
-    
+
     log INFO "Initializing Odoo database..."
     echo -e "${CYAN}Initializing the Odoo database. This may take a few minutes...${RESET}"
-    
+
     # Wait for services to be ready
     echo -e "${YELLOW}Waiting for services to start...${RESET}"
     sleep 10
-    
+
     # Create the first database using Odoo's API
     echo -e "${CYAN}Creating initial database...${RESET}"
     curl -s -X POST \
@@ -654,7 +671,7 @@ initialize_database() {
         http://localhost:8069/web/database/create > /dev/null
 
     validate "Database creation" "curl -s http://localhost:8069/web/database/selector" "Failed to create database"
-    
+
     log INFO "Database initialized and ready to use"
     echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
 }
@@ -662,16 +679,16 @@ initialize_database() {
 # Check service health
 check_service_health() {
     show_progress "Verifying Services"
-    
+
     log INFO "Checking service health..."
     echo -e "${CYAN}Checking if Odoo services are running properly...${RESET}"
-    
+
     local max_attempts=30
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
         echo -ne "${YELLOW}Checking services ($attempt/$max_attempts)...${RESET}\r"
-        
+
         # Check if database is accessible
         if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT 1" >/dev/null 2>&1; then
             # Check if Odoo web interface is responding
@@ -681,11 +698,11 @@ check_service_health() {
                 return 0
             fi
         fi
-        
+
         sleep 2
         attempt=$((attempt + 1))
     done
-    
+
     log ERROR "Services failed to become ready"
     echo -e "\n${RED}${BOLD}⚠ Services failed to start properly${RESET}"
     return 1
@@ -694,14 +711,14 @@ check_service_health() {
 # Verify installation
 verify_installation() {
     show_progress "Verifying Installation"
-    
+
     log INFO "Verifying installation..."
     echo -e "${CYAN}Performing final verification checks...${RESET}"
-    
+
     # Check database existence and content
     echo -ne "${YELLOW}Checking database...${RESET}\r"
     local db_check=$(docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null)
-    
+
     if [ $? -ne 0 ] || [ -z "$db_check" ]; then
         log ERROR "Database verification failed"
         echo -e "${RED}${BOLD}⚠ Database verification failed${RESET}"
@@ -728,29 +745,37 @@ verify_installation() {
 # Start Docker containers
 start_containers() {
     show_progress "Starting Docker Containers"
-    
+
     log INFO "Starting Docker containers..."
     cd "$INSTALL_DIR"
-    
+
     # Pull images
     log INFO "Pulling Docker images..."
     echo -e "${CYAN}Pulling Docker images...${RESET}"
-    docker-compose pull
-    
+    if command -v docker-compose &>/dev/null; then
+        docker-compose pull
+    else
+        docker compose pull
+    fi
+
     # Start containers
     log INFO "Starting containers..."
     echo -e "${CYAN}Starting containers...${RESET}"
-    docker-compose up -d
-    
+    if command -v docker-compose &>/dev/null; then
+        docker-compose up -d
+    else
+        docker compose up -d
+    fi
+
     # Wait for services to be ready
     log INFO "Waiting for services to start..."
     echo -e "${YELLOW}Waiting for services to initialize...${RESET}"
     sleep 10
-    
+
     # Validate containers
     validate "Odoo container" "docker ps | grep -q '$CONTAINER_NAME'" "Odoo container failed to start"
     validate "PostgreSQL container" "docker ps | grep -q '$DB_CONTAINER'" "PostgreSQL container failed to start"
-    
+
     echo -e "${GREEN}${BOLD}✓${RESET} Docker containers started successfully"
 }
 
@@ -760,7 +785,7 @@ show_completion() {
     echo -e "${GREEN}${BOLD}Odoo 17 has been successfully installed for {client_name}!${RESET}"
     echo -e "${CYAN}${BOLD}You can access Odoo at:${RESET}"
     echo -e "  ${BOLD}HTTP:${RESET}  http://$(hostname -I | awk '{print $1}'):8069"
-    
+
     if [ -f "$INSTALL_DIR/ssl-config.conf" ]; then
         # Extract domain from SSL config
         source "$INSTALL_DIR/ssl-config.conf"
@@ -768,26 +793,26 @@ show_completion() {
             echo -e "  ${BOLD}HTTPS:${RESET} https://$DOMAIN"
         fi
     fi
-    
+
     echo -e "\n${CYAN}${BOLD}Login Credentials:${RESET}"
     echo -e "  ${BOLD}Username:${RESET} admin"
     echo -e "  ${BOLD}Password:${RESET} {client_password}"
     echo -e "  ${BOLD}Master Password:${RESET} {client_password}"
-    
+
     echo -e "\n${CYAN}${BOLD}Installation Directory:${RESET} $INSTALL_DIR"
     echo -e "${CYAN}${BOLD}Log File:${RESET} $LOG_FILE"
-    
+
     echo -e "\n${CYAN}${BOLD}Useful Commands:${RESET}"
     echo -e "  ${YELLOW}View Logs:${RESET}          ${DIM}docker logs -f $CONTAINER_NAME${RESET}"
     echo -e "  ${YELLOW}Restart Odoo:${RESET}       ${DIM}cd $INSTALL_DIR && docker-compose restart web${RESET}"
     echo -e "  ${YELLOW}Stop Odoo:${RESET}          ${DIM}cd $INSTALL_DIR && docker-compose down${RESET}"
     echo -e "  ${YELLOW}Start Odoo:${RESET}         ${DIM}cd $INSTALL_DIR && docker-compose up -d${RESET}"
     echo -e "  ${YELLOW}Backup Database:${RESET}    ${DIM}$INSTALL_DIR/backup.sh backup${RESET}"
-    
+
     if [ -f "$INSTALL_DIR/ssl-setup.sh" ]; then
         echo -e "  ${YELLOW}Configure SSL:${RESET}      ${DIM}$INSTALL_DIR/ssl-setup.sh${RESET}"
     fi
-    
+
     echo -e "\n${GREEN}${BOLD}Thank you for using Odoo 17!${RESET}\n"
 }
 
@@ -795,16 +820,16 @@ show_completion() {
 main() {
     # Display banner
     show_banner
-    
+
     # Create log directory if it doesn't exist
     mkdir -p "$(dirname "$TEMP_LOG")"
-    
+
     log INFO "Starting Odoo 17 installation for {client_name}"
-    
+
     # Analyze system and show summary
     analyze_system
     show_summary
-    
+
     # Perform installation
     check_prerequisites
     create_directories
@@ -816,19 +841,19 @@ main() {
     initialize_database
     check_service_health
     verify_installation
-    
+
     # SSL Configuration
     if [ -f "$INSTALL_DIR/ssl-config.conf" ] && [ -f "$INSTALL_DIR/ssl-setup.sh" ]; then
         show_progress "Configuring SSL/HTTPS"
-        
+
         log INFO "Setting up SSL/HTTPS..."
         echo -e "${CYAN}Setting up SSL/HTTPS...${RESET}"
         chmod +x "$INSTALL_DIR/ssl-setup.sh"
-        
+
         # Run SSL setup script
         cd "$INSTALL_DIR"
         ./ssl-setup.sh
-        
+
         if [ $? -eq 0 ]; then
             log INFO "SSL setup completed successfully"
             echo -e "${GREEN}${BOLD}✓${RESET} SSL/HTTPS configured successfully"
@@ -842,10 +867,10 @@ main() {
         echo -e "${YELLOW}SSL configuration files not found, skipping SSL setup.${RESET}"
         echo -e "${YELLOW}To set up SSL later, copy ssl-config.conf.template to ssl-config.conf, edit it, and run ./ssl-setup.sh${RESET}"
     fi
-    
+
     log INFO "Installation completed successfully"
     show_completion
 }
 
 # Run main function
-main 
+main  

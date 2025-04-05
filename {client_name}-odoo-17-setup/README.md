@@ -11,6 +11,7 @@ This repository contains the Docker-based installation of Odoo 17 Enterprise for
 - [Directory Structure](#directory-structure)
 - [Backup Management](#backup-management)
 - [Staging Management](#staging-management)
+- [Git Management](#git-management)
 - [Configuration](#configuration)
 - [Maintenance](#maintenance)
 - [Troubleshooting](#troubleshooting)
@@ -223,6 +224,54 @@ Each staging environment is created under `/{client_name}-odoo-17/staging/` with
 - Port checks are automatic
 </details>
 
+## Git Management 🔄
+
+<details>
+<summary>Git Commands and Integration</summary>
+
+The installation includes a git management system similar to odoo.sh that allows you to manage your custom addons using git, automatically create branches for staging environments, and synchronize changes.
+
+### Git Panel Commands
+
+1. Setup git repository:
+```bash
+sudo ./git_panel.sh setup
+```
+
+2. Check status of git repository:
+```bash
+sudo ./git_panel.sh status
+```
+
+3. Fetch remote changes:
+```bash
+sudo ./git_panel.sh fetch
+```
+
+4. Push local changes:
+```bash
+sudo ./git_panel.sh push
+```
+
+5. Pull changes from a branch:
+```bash
+sudo ./git_panel.sh pull [branch]
+```
+
+6. List available branches:
+```bash
+sudo ./git_panel.sh list-branches
+```
+
+### Integration with Staging Environments
+
+- When creating a new staging environment, a corresponding git branch is automatically created.
+- When deleting a staging environment, you will be warned if there are uncommitted changes in the git branch.
+- Each staging environment's addons directory is associated with its respective git branch.
+- The main installation always corresponds to the "main" branch.
+
+</details>
+
 ## Configuration ⚙️
 
 <details>
@@ -356,4 +405,4 @@ This installation is covered by your Odoo Enterprise subscription. Ensure compli
 ## Change Log 📝
 
 - 2025-01: Initial documentation
-- [Add future changes here] 
+- [Add future changes here]    
