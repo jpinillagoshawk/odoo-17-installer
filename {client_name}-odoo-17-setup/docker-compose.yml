@@ -6,7 +6,7 @@ services:
     depends_on:
       - db
     ports:
-      - "0.0.0.0:8069:8069"
+      - "0.0.0.0:{odoo_port}:8069"
     volumes:
       - ./config:/etc/odoo
       - ./volumes/odoo-data:/var/lib/odoo
@@ -15,7 +15,7 @@ services:
       - ./logs:/var/log/odoo
     environment:
       - HOST=db
-      - PORT=5432
+      - PORT={db_port}
       - USER=odoo
       - PASSWORD={client_password}
       - PROXY_MODE=True

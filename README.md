@@ -102,20 +102,17 @@ The system uses a templating approach:
    - `docker-compose.yml`
    - Configuration files in the `config/` directory
 
-## Deployment Process
+## Install Process
 
-1. Create client configuration file (e.g., `client-setup.conf`)
-2. Generate client-specific setup:
+1. Modify client configuration file `odoo-17-setup.conf`
+2. Run the setup file:
    ```bash
-   python create_client_setup.py client-setup.conf
+   python create_client_setup.py
    ```
-3. Deploy to server:
+3. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17-setup/odoo_17.0+e.latest_all.deb
+4. Run new installation script:
    ```bash
-   scp -r client_name-odoo-17-setup/ user@server:/opt/
-   ```
-4. Run installation script:
-   ```bash
-   cd /opt/client_name-odoo-17-setup
+   cd /{client_name}-odoo-17-setup
    ./install.sh
    ```
 5. Configure SSL (if needed):
@@ -217,4 +214,4 @@ Common issues and solutions:
 
 ## Contributing
 
-[Specify contribution guidelines] 
+[Specify contribution guidelines]
