@@ -1,0 +1,48 @@
+version: '3.1'
+services:
+  web:
+    image: odoo:17.0
+    container_name: odoo17-{client_name}
+    depends_on:
+      - db
+    ports:
+      - "0.0.0.0:8069:8069"
+    volumes:
+      - ./config:/etc/odoo
+      - ./volumes/odoo-data:/var/lib/odoo
+      - ./enterprise:/mnt/enterprise
+      - ./addons:/mnt/extra-addons
+      - ./logs:/var/log/odoo
+    environment:
+      - HOST=db
+      - PORT=5432
+      - USER=odoo
+      - PASSWORD={client_password}
+      - PROXY_MODE=True
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    restart: unless-stopped
+
+  db:
+    image: postgres:15
+    container_name: db-{client_name}
+    environment:
+      - POSTGRES_DB=postgres_{client_name}
+      - POSTGRES_PASSWORD={client_password}
+      - POSTGRES_USER=odoo
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - ./volumes/postgres-data:/var/lib/postgresql/data/pgdata
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  odoo-data:
+  postgres-data:

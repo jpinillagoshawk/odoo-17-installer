@@ -1,0 +1,37 @@
+# Odoo 17 SSL Configuration
+# Generated: $(date)
+
+# SSL Configuration Type (PROXY or DIRECT)
+SSL_TYPE=PROXY
+
+# Domain Configuration
+DOMAIN=example.com
+USE_WILDCARD=true
+WILDCARD_DOMAIN=*.example.com
+
+# Reverse Proxy Configuration (when SSL_TYPE=PROXY)
+NGINX_INSTALLED=auto
+NGINX_CONF_PATH=/etc/nginx/conf.d
+NGINX_SSL_PORT=443
+REDIRECT_HTTP_TO_HTTPS=true
+
+# Certificate Configuration
+CERT_PROVIDER=letsencrypt
+CERT_EMAIL=admin@example.com
+CERT_AUTO_RENEW=true
+
+# Manual Certificate Paths (if not using Let's Encrypt)
+SSL_CERT_PATH=
+SSL_KEY_PATH=
+SSL_CHAIN_PATH=
+
+# Control Panel Detection (set to "true" to skip auto-detection)
+HAS_CPANEL=auto
+HAS_PLESK=auto
+PANEL_MANAGED_SSL=false
+
+# Advanced Options
+SSL_PROTOCOLS="TLSv1.2 TLSv1.3"
+SSL_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384"
+HSTS_ENABLED=true
+HSTS_MAX_AGE=31536000
