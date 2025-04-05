@@ -58,12 +58,12 @@ load_git_config() {
 save_git_config() {
     local repo_url=$1
     local username=$2
-    local token=$3
-
+    
     echo "REPO_URL=\"$repo_url\"" > "$GIT_CONFIG_FILE"
     echo "USERNAME=\"$username\"" >> "$GIT_CONFIG_FILE"
-    echo "TOKEN=\"$token\"" >> "$GIT_CONFIG_FILE"
-    chmod 600 "$GIT_CONFIG_FILE" # Secure permissions for token storage
+    
+    git config --global credential.helper store
+    chmod 600 "$GIT_CONFIG_FILE"
 }
 
 setup_git_repository() {
@@ -85,9 +85,10 @@ setup_git_repository() {
     
     read -p "Enter GitHub username: " username
     
-    read -p "Enter GitHub personal access token (for authentication): " token
+    echo "You will be prompted for your password/token when performing git operations."
+    echo "This will be stored securely using git's credential helper."
     
-    save_git_config "$repo_url" "$username" "$token"
+    save_git_config "$repo_url" "$username"
     
     if [ ! -d "$ADDONS_DIR" ]; then
         mkdir -p "$ADDONS_DIR"
