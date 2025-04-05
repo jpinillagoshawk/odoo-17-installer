@@ -516,6 +516,9 @@ create_backup_script() {
     cp staging.sh "$INSTALL_DIR/staging.sh"
     chmod +x "$INSTALL_DIR/staging.sh"
     
+    cp git_panel.sh "$INSTALL_DIR/git_panel.sh"
+    chmod +x "$INSTALL_DIR/git_panel.sh"
+    
     # Copy SSL setup script if it exists
     if [ -f "ssl-setup.sh" ]; then
         cp ssl-setup.sh "$INSTALL_DIR/ssl-setup.sh"
@@ -848,4 +851,4 @@ main() {
 }
 
 # Run main function
-main 
+main  

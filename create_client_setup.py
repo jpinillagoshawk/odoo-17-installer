@@ -48,7 +48,8 @@ FILES_TO_COPY = [
     "install.sh",
     "docker-compose.yml",
     "ssl-setup.sh",
-    "direct-ssl-config.conf"
+    "direct-ssl-config.conf",
+    "git_panel.sh"
 ]
 
 # Directories to be created if they don't exist in template
