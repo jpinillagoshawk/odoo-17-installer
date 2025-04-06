@@ -84,7 +84,7 @@ create_backup() {
     backup_file="$backup_path/backup_${TIMESTAMP}.zip"
 
     echo "Creating $type backup..."
-    
+
     # Create backup directory if it doesn't exist
     mkdir -p "$backup_path"
     mkdir -p "$TEMP_DIR"
@@ -95,10 +95,10 @@ create_backup() {
     # Stop Odoo container for consistent backup
     echo "Stopping Odoo service..."
     docker-compose stop web || backup_failed=true
-    
+
     # Use trap to ensure cleanup on exit
     trap 'cleanup_and_restart "$current_dir" "$backup_file" "$backup_failed" "$TEMP_DIR/filestore"' EXIT
-    
+
     if [ "$backup_failed" = true ]; then
         echo "Failed to stop Odoo service"
         exit 1
@@ -111,7 +111,7 @@ create_backup() {
         backup_failed=true
         exit 1
     fi
-    
+
     # Backup filestore directly from volume
     echo "Backing up filestore..."
     if ! cp -a "$INSTALL_DIR/volumes/odoo-data/filestore/." "$TEMP_DIR/filestore/"; then
@@ -123,11 +123,11 @@ create_backup() {
     # Update timestamps to reflect backup time
     echo "Updating filestore timestamps..."
     find "$TEMP_DIR/filestore" -type f -exec touch {} +
-    
+
     # Create a list of filestore paths for future cleanup
     echo "Creating filestore path list..."
     find "$TEMP_DIR/filestore" -type d -mindepth 1 -maxdepth 1 -printf "%f\n" > "$TEMP_DIR/filestore/filestore.list"
-    
+
     # Create zip archive
     echo "Creating backup archive..."
     cd "$TEMP_DIR"
@@ -142,7 +142,7 @@ create_backup() {
 
     # Cleanup will be handled by trap
     rm -rf "$TEMP_DIR"
-    
+
     echo "Backup completed: $backup_file"
     backup_failed=false
 }
@@ -153,12 +153,12 @@ cleanup_and_restart() {
     local backup_file=$2
     local failed=$3
     local filestore_temp=$4
-    
+
     # Always try to restart Odoo
     echo "Ensuring Odoo service is running..."
     cd "$INSTALL_DIR"
     docker-compose start web
-    
+
     # If backup failed, remove the partial backup file and clean temporary filestore
     if [ "$failed" = true ]; then
         if [ -n "$backup_file" ] && [ -f "$backup_file" ]; then
@@ -170,15 +170,15 @@ cleanup_and_restart() {
             rm -rf "$filestore_temp"
         fi
     fi
-    
+
     # Return to original directory
     cd "$original_dir"
-    
+
     # Clean up temp directory if it exists
     if [ -d "$TEMP_DIR" ]; then
         rm -rf "$TEMP_DIR"
     fi
-    
+
     # Remove trap
     trap - EXIT
 }
@@ -187,7 +187,7 @@ cleanup_and_restart() {
 restore_backup() {
     local backup_file=$1
     local current_dir=$(pwd)
-    
+
     if [ ! -f "$backup_file" ]; then
         echo "Error: Backup file not found: $backup_file"
         exit 1
@@ -199,14 +199,14 @@ restore_backup() {
     fi
 
     echo "Restoring from backup: $backup_file"
-    
+
     # Create temporary directory
     mkdir -p "$TEMP_DIR"
-    
+
     # Extract backup
     echo "Extracting backup..."
     unzip "$backup_file" -d "$TEMP_DIR"
-    
+
     # Verify backup contents and determine format
     if [ -f "$TEMP_DIR/dump.backup" ]; then
         echo "Found backup in custom format (dump.backup)"
@@ -228,7 +228,7 @@ restore_backup() {
         echo "Found backup in SQL format (dump.sql)"
         DUMP_FILE="dump.sql"
         IS_CUSTOM_FORMAT=false
-        
+
         echo "Analyzing dump file to detect database properties..."
         local detected_db_name=""
         if grep -q "postgres_[a-zA-Z0-9_-]*" "$TEMP_DIR/$DUMP_FILE"; then
@@ -243,7 +243,7 @@ restore_backup() {
         rm -rf "$TEMP_DIR"
         exit 1
     fi
-    
+
     DETECTED_DB_NAME="$detected_db_name"
 
     if [ ! -d "$TEMP_DIR/filestore" ]; then
@@ -251,31 +251,31 @@ restore_backup() {
         rm -rf "$TEMP_DIR"
         exit 1
     fi
-    
+
     # Change to INSTALL_DIR for docker-compose commands
     cd "$INSTALL_DIR"
-    
+
     if [ -n "$DETECTED_DB_NAME" ] && [ "$DETECTED_DB_NAME" != "$DB_NAME" ]; then
         echo "Warning: Detected database name ($DETECTED_DB_NAME) does not match current configuration ($DB_NAME)"
         echo "Updating configuration files to match the database dump..."
-        
+
         local detected_client_name=$(echo "$DETECTED_DB_NAME" | sed -E 's/postgres_(.+)/\1/')
-        
+
         echo "Updating docker-compose.yml..."
         sed -i "s/container_name: odoo17-[a-zA-Z0-9_-]*/container_name: odoo17-$detected_client_name/" docker-compose.yml
         sed -i "s/container_name: db-[a-zA-Z0-9_-]*/container_name: db-$detected_client_name/" docker-compose.yml
         sed -i "s/POSTGRES_DB=postgres_[a-zA-Z0-9_-]*/POSTGRES_DB=$DETECTED_DB_NAME/" docker-compose.yml
         sed -i "s/command: -- --init=base -d postgres_[a-zA-Z0-9_-]*/command: -- --init=base -d $DETECTED_DB_NAME/" docker-compose.yml 2>/dev/null || true
-        
+
         echo "Updating odoo.conf..."
         sed -i "s/db_name = postgres_[a-zA-Z0-9_-]*/db_name = $DETECTED_DB_NAME/" config/odoo.conf 2>/dev/null || true
-        
+
         echo "Updating backup.sh script variables and file..."
-        
+
         CONTAINER_NAME="odoo17-$detected_client_name"
         DB_CONTAINER="db-$detected_client_name"
         DB_NAME="$DETECTED_DB_NAME"
-        
+
         local temp_backup_script=$(mktemp)
         cat backup.sh | \
             sed "s/CONTAINER_NAME=\"odoo17-[a-zA-Z0-9_-]*\"/CONTAINER_NAME=\"odoo17-$detected_client_name\"/" | \
@@ -283,25 +283,25 @@ restore_backup() {
             sed "s/DB_NAME=\"postgres_[a-zA-Z0-9_-]*\"/DB_NAME=\"$DETECTED_DB_NAME\"/" > "$temp_backup_script"
         cat "$temp_backup_script" > backup.sh
         rm "$temp_backup_script"
-        
+
         echo "Configuration files updated successfully."
     fi
-    
+
     # Stop containers
     echo "Stopping services..."
     docker-compose down
-    
+
     # Start database container
     echo "Starting database..."
     docker-compose up -d db
     sleep 10
-    
+
     # Recreate database
     echo "Recreating database..."
     docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';"
     docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "DROP DATABASE IF EXISTS $DB_NAME;"
     docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "CREATE DATABASE $DB_NAME;"
-    
+
     # Restore database based on format
     echo "Restoring database..."
     if [ "$IS_CUSTOM_FORMAT" = true ]; then
@@ -309,7 +309,7 @@ restore_backup() {
     else
         cat "$TEMP_DIR/$DUMP_FILE" | docker exec -i $DB_CONTAINER psql -U $DB_USER $DB_NAME
     fi
-    
+
     # Restore filestore directly to volume
     echo "Restoring filestore..."
     rm -rf "$INSTALL_DIR/volumes/odoo-data/filestore"
@@ -318,25 +318,25 @@ restore_backup() {
         echo "Filestore restore failed"
         exit 1
     fi
-    
+
     # Update timestamps to reflect restore time
     echo "Updating filestore timestamps..."
     find "$INSTALL_DIR/volumes/odoo-data/filestore" -exec touch {} +
-    
+
     # Start all services
     echo "Starting services..."
     docker-compose up -d
-    
+
     # Wait for services to be ready
     echo "Waiting for services to start..."
     sleep 10
-    
+
     # Return to original directory
     cd "$current_dir"
-    
+
     # Cleanup
     rm -rf "$TEMP_DIR"
-    
+
     # Verify restore
     if curl -s http://localhost:8069/web/database/selector | grep -q "$DB_NAME"; then
         echo "Restore verified successfully"
@@ -351,7 +351,7 @@ list_backups() {
     local daily_count=0
     local monthly_count=0
     local backups=()
-    
+
     echo "Available backups:"
     echo "-----------------"
     echo "Daily backups:"
@@ -364,7 +364,7 @@ list_backups() {
             echo "  $daily_count) $(basename "$backup") ($size) - $date"
         fi
     done < <(find "$BACKUP_DIR/daily" -maxdepth 1 -type f -name "backup_*.zip" -print0 | sort -z -r | tr '\0' '\n')
-    
+
     echo -e "\nMonthly backups:"
     while IFS= read -r backup; do
         if [ -f "$backup" ]; then
@@ -376,12 +376,12 @@ list_backups() {
             echo "  $count) $(basename "$backup") ($size) - $date"
         fi
     done < <(find "$BACKUP_DIR/monthly" -maxdepth 1 -type f -name "backup_*.zip" -print0 | sort -z -r | tr '\0' '\n')
-    
+
     if [ $((daily_count + monthly_count)) -eq 0 ]; then
         echo "No backups found."
         exit 1
     fi
-    
+
     echo -e "\nSelect a backup to restore (1-$((daily_count + monthly_count))) or 'q' to quit:"
     local selection
     while true; do
@@ -392,16 +392,16 @@ list_backups() {
         elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le $((daily_count + monthly_count)) ]; then
             local selected_backup="${backups[$((selection-1))]}"
             echo -e "\nYou selected: $(basename "$selected_backup")"
-            
+
             # Confirmation loop
             while true; do
                 echo "Are you sure you want to restore this backup? ([Y]/n)"
                 local confirm
                 read -r confirm
-                
+
                 # Convert to lowercase for comparison
                 confirm=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
-                
+
                 if [[ -z "$confirm" ]] || [[ "$confirm" == "y" ]] || [[ "$confirm" == "yes" ]]; then
                     restore_backup "$selected_backup"
                     break
