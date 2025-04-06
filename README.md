@@ -104,17 +104,18 @@ The system uses a templating approach:
 
 ## Install Process
 
-1. Modify client configuration file `odoo-17-setup.conf`
+1. Modify client configuration file `odoo-17-setup.conf` with your client parameters
 2. Run the setup file:
    ```bash
-   python create_client_setup.py
+   python create_client_setup.py odoo-17-setup.conf
    ```
-3. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17-setup/odoo_17.0+e.latest_all.deb
-4. Run new installation script:
+3. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/
+4. Run the installation script:
    ```bash
-   cd /{client_name}-odoo-17-setup
+   cd <path_to_install>/{client_name}-odoo-17
    ./install.sh
    ```
+   This will automatically start Docker containers for a plug-and-play experience.
 5. Configure SSL (if needed):
    ```bash
    ./ssl-setup.sh
