@@ -125,7 +125,10 @@ def normalize_install_path(config):
     if not base_path:
         base_path = os.path.dirname(os.path.abspath(__file__))
     
-    return os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
+    if f"{client_name}-odoo-17" in base_path:
+        return os.path.normpath(base_path)
+    else:
+        return os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
 
 def load_config(config_file):
     """Load configuration from file with enhanced validation"""
@@ -153,11 +156,11 @@ def load_config(config_file):
 
     required_fields = ['client_name', 'client_password']
     missing_fields = []
-    
+
     for field in required_fields:
         if field not in config['DEFAULT'] or not config['DEFAULT'][field]:
             missing_fields.append(field)
-    
+
     if missing_fields:
         print(f"Error: The following required fields are missing in the config file: {', '.join(missing_fields)}")
         print(f"Tip: Edit {config_file} and add values for these fields")
@@ -169,7 +172,7 @@ def load_config(config_file):
         print("Tip: Use letters and numbers only, no spaces or special characters")
         sys.exit(1)
     result['client_name'] = client_name
-    
+
     result['client_password'] = config['DEFAULT']['client_password']
 
     # Optional values with defaults
@@ -194,12 +197,12 @@ def load_config(config_file):
                 os.path.dirname(os.path.abspath(__file__)),
                 result['path_to_install']
             ))
-    
+
     if not os.path.exists(result['path_to_install']):
         print(f"Error: Installation path does not exist: {result['path_to_install']}")
         print(f"Tip: Create the directory first or specify a different path")
         sys.exit(1)
-    
+
     if not os.access(result['path_to_install'], os.W_OK):
         print(f"Error: No write permission to installation path: {result['path_to_install']}")
         print(f"Tip: Change directory permissions or specify a different path")
@@ -320,7 +323,7 @@ def fix_readme_installation_steps(file_path, config):
     base_path = os.path.normpath(config['path_to_install'])
     if not base_path:
         base_path = os.path.dirname(os.path.abspath(__file__))
-    
+
     install_path = os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
 
     # Create corrected installation steps
@@ -413,13 +416,22 @@ def modify_file(file_path, config):
     client_name = config['client_name']
     client_password = config['client_password']
     install_path = normalize_install_path(config)
+    path_to_install = os.path.normpath(config['path_to_install'])
 
     # Read file content
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
         content = file.read()
 
+    print(f"DEBUG: In file {file_path}")
+    print(f"DEBUG: Path to install value: {path_to_install}")
+    print(f"DEBUG: Number of {path_to_install} occurrences before replacement: {content.count(path_to_install)}")
+    print(f"DEBUG: Install path: {install_path}")
+
     # Apply client name replacements in different formats
     client_title = client_name.title()
+
+    content = content.replace('{client_name}', client_name)
+    content = content.replace('{client_password}', client_password)
 
     # Replace container names
     content = content.replace('odoo17-{client_name}', f'odoo17-{client_name}')
@@ -434,53 +446,63 @@ def modify_file(file_path, config):
     content = content.replace('installation of Odoo 17 Enterprise for {client_name}',
                      f'installation of Odoo 17 Enterprise for {client_title}')
 
-    # Replace remaining generic occurrences - avoid partial word matches
-    content = re.sub(r'(?<![a-zA-Z0-9_-]){client_name}(?![a-zA-Z0-9_-])', client_name, content, flags=re.IGNORECASE)
-    content = re.sub(r'(?<![a-zA-Z0-9_-]){client_name}(?![a-zA-Z0-9_-])', client_title, content)
-    content = re.sub(r'(?<![a-zA-Z0-9_-]){client_name}(?![a-zA-Z0-9_-])', client_name.upper(), content)
-
-    # Replace password
-    content = content.replace('{password}', client_password)
-
     # Replace specific configuration values
     content = content.replace('{ip}', config['ip'])
     content = content.replace('{odoo_port}', config['odoo_port'])
     content = content.replace('{db_port}', config['db_port'])
 
-    path_to_install = os.path.normpath(config['path_to_install'])
-    content = content.replace('{path_to_install}', path_to_install)
-    
     if file_path.endswith('install.sh') or file_path.endswith('backup.sh') or file_path.endswith('git_panel.sh') or file_path.endswith('staging.sh'):
         lines = content.split('\n')
         for i, line in enumerate(lines):
             if line.strip().startswith('INSTALL_DIR='):
-                clean_path = os.path.normpath(f"{path_to_install}/{client_name}-odoo-17")
-                lines[i] = f'INSTALL_DIR="{clean_path}"'
+                original_line = line
+                lines[i] = f'INSTALL_DIR="{install_path}"'
+                print(f"DEBUG: Original INSTALL_DIR line: {original_line}")
+                print(f"DEBUG: New INSTALL_DIR line: {lines[i]}")
+                
                 if i+1 < len(lines) and 'sed' in lines[i+1] and 'INSTALL_DIR' in lines[i+1]:
+                    print(f"DEBUG: Found sed command that might modify INSTALL_DIR: {lines[i+1]}")
                     lines[i+1] = ''
                 break
+        
         content = '\n'.join(lines)
+        
+        print(f"DEBUG: Skipping general path replacement for script file {file_path}")
+    else:
+        content = content.replace('{path_to_install}', path_to_install)
 
     # Update DB_USER if needed
     if config['db_user'] != 'odoo':
         content = re.sub(r'DB_USER="odoo"', f'DB_USER="{config["db_user"]}"', content)
 
-    content = content.replace('{client_name}', client_name)
-    content = content.replace('{client_password}', client_password)
-    
-    path_patterns = [
-        (r'/odoo17(?=/|"|$| )', f'{install_path}'),
-        (r'/{0}-odoo-17(?=/|"|$| )'.format(re.escape(client_name)), f'{install_path}')
-    ]
-    
-    for pattern, replacement in path_patterns:
-        content = re.sub(pattern, replacement, content)
+    occurrences = content.count(path_to_install)
+    print(f"DEBUG: Number of {path_to_install} occurrences after replacement: {occurrences}")
+
+    if occurrences > 1:
+        # Find the lines containing the duplicated path
+        lines = content.split('\n')
+        duplicate_lines = [line for line in lines if path_to_install in line]
+        print(f"ERROR: Found duplicate path in file {file_path}:")
+        for i, line in enumerate(duplicate_lines):
+            print(f"  Line {i+1}: {line}")
+        print("Terminating to prevent path duplication.")
+        sys.exit(1)
 
     # Write modified content back to file
     with open(file_path, 'w', encoding='utf-8') as file:
         file.write(content)
 
     print(f"Modified: {file_path}")
+
+    # Verify the final content in the file to catch any discrepancies
+    if file_path.endswith('install.sh'):
+        print("DEBUG: Final verification of install.sh file:")
+        with open(file_path, 'r', encoding='utf-8') as file:
+            install_content = file.read()
+            install_lines = install_content.split('\n')
+            for i, line in enumerate(install_lines):
+                if "INSTALL_DIR" in line:
+                    print(f"  Line {i+1}: {line}")
 
     # Special handling for specific files
     if file_path.endswith('README.md'):
@@ -540,9 +562,10 @@ def main():
         base_path = os.path.normpath(config['path_to_install'])
     else:
         base_path = current_dir
-    
+
     target_dir = normalize_install_path(config)
-    
+    print(f"DEBUG: Installation directory: {target_dir}")
+
     # Check if target directory already exists
     if os.path.exists(target_dir):
         print(f"Directory {target_dir} already exists. Operation cancelled")
@@ -555,7 +578,7 @@ def main():
 
     # Copy template files and customize them
     copy_template_files(template_dir, target_dir, config)
-    
+
     deb_file = os.path.join(current_dir, "odoo_17.0+e.latest_all.deb")
     if os.path.exists(deb_file):
         shutil.copy2(deb_file, target_dir)
