@@ -260,7 +260,8 @@ def fix_readme_installation_steps(file_path, config):
     client_name = config['client_name']
     user = config['user']
     ip = config['ip']
-    install_path = os.path.join(config['path_to_install'], f"{client_name}-odoo-17")
+    base_path = os.path.normpath(config['path_to_install'])
+    install_path = os.path.join(base_path, f"{client_name}-odoo-17")
 
     # Create corrected installation steps
     corrected_steps = f'''1. Clone this repository to `{install_path}`:
@@ -350,7 +351,8 @@ def modify_file(file_path, config):
 
     client_name = config['client_name']
     client_password = config['client_password']
-    install_path = os.path.join(config['path_to_install'], f"{client_name}-odoo-17")
+    base_path = os.path.normpath(config['path_to_install'])
+    install_path = os.path.join(base_path, f"{client_name}-odoo-17")
 
     # Read file content
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
@@ -387,27 +389,39 @@ def modify_file(file_path, config):
 
     # Special case for file paths in install.sh
     if file_path.endswith('install.sh'):
-        # Replace the install directory constant
-        content = content.replace('INSTALL_DIR="/odoo17"', f'INSTALL_DIR="{install_path}"')
-        content = content.replace('INSTALL_DIR="/{client_name}-odoo-17"', f'INSTALL_DIR="/{client_name}-odoo-17"')
+        content = content.replace('INSTALL_DIR="/{client_name}-odoo-17"', f'INSTALL_DIR="{install_path}"')
+        
+        content = re.sub(r'INSTALL_DIR=".*"', f'INSTALL_DIR="{install_path}"', content)
 
         # Update DB_USER if needed
         if config['db_user'] != 'odoo':
             content = content.replace('DB_USER="odoo"', f'DB_USER="{config["db_user"]}"')
 
     # Update paths in any file
-    content = content.replace('/odoo17/', f'/{client_name}-odoo-17/')
-    content = content.replace('/odoo17"', f'/{client_name}-odoo-17"')
-    content = content.replace('/odoo17 ', f'/{client_name}-odoo-17 ')
+    content = content.replace('/odoo17/', f'{install_path}/')
+    content = content.replace('/odoo17"', f'{install_path}"')
+    content = content.replace('/odoo17 ', f'{install_path} ')
+    content = content.replace(f'/{client_name}-odoo-17/', f'{install_path}/')
+    content = content.replace(f'/{client_name}-odoo-17"', f'{install_path}"')
+    content = content.replace(f'/{client_name}-odoo-17 ', f'{install_path} ')
+    content = content.replace('/{client_name}-odoo-17/', f'{install_path}/')
+    content = content.replace('/{client_name}-odoo-17"', f'{install_path}"')
+    content = content.replace('/{client_name}-odoo-17 ', f'{install_path} ')
 
     # Direct string replacements for {client_name} literal
     content = content.replace('{client_name}', client_name)
     content = content.replace('{client_password}', client_password)
 
     # Update paths in any file
-    content = content.replace('/odoo17/', f'/{client_name}-odoo-17/')
-    content = content.replace('/odoo17"', f'/{client_name}-odoo-17"')
-    content = content.replace('/odoo17 ', f'/{client_name}-odoo-17 ')
+    content = content.replace('/odoo17/', f'{install_path}/')
+    content = content.replace('/odoo17"', f'{install_path}"')
+    content = content.replace('/odoo17 ', f'{install_path} ')
+    content = content.replace(f'/{client_name}-odoo-17/', f'{install_path}/')
+    content = content.replace(f'/{client_name}-odoo-17"', f'{install_path}"')
+    content = content.replace(f'/{client_name}-odoo-17 ', f'{install_path} ')
+    content = content.replace('/{client_name}-odoo-17/', f'{install_path}/')
+    content = content.replace('/{client_name}-odoo-17"', f'{install_path}"')
+    content = content.replace('/{client_name}-odoo-17 ', f'{install_path} ')
 
     # Write modified content back to file
     with open(file_path, 'w', encoding='utf-8') as file:

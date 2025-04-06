@@ -63,7 +63,7 @@ STEP=0
 TOTAL_STEPS=10  # Update this as needed
 
 # Constants
-INSTALL_DIR="/{client_name}-odoo-17"
+INSTALL_DIR="{path_to_install}/{client_name}-odoo-17"
 TEMP_LOG="/tmp/odoo_install.log"
 LOG_FILE="$INSTALL_DIR/logs/install.log"
 ODOO_ENTERPRISE_DEB="./odoo_17.0+e.latest_all.deb"
@@ -379,6 +379,14 @@ create_directories() {
     show_progress "Creating Directory Structure"
 
     log INFO "Creating directory structure..."
+
+    if [ ! -w "$(dirname "$INSTALL_DIR")" ]; then
+        log ERROR "No write permission to $(dirname "$INSTALL_DIR")"
+        echo -e "${RED}${BOLD}⚠ Cannot create directories in $(dirname "$INSTALL_DIR")${RESET}"
+        echo -e "${YELLOW}This could be because the path requires sudo permission or does not exist.${RESET}"
+        echo -e "${YELLOW}Solution: Update 'path_to_install' in your configuration file or run with sudo.${RESET}"
+        exit 1
+    fi
 
     # Create all required directories with proper structure
     for dir in \
@@ -873,4 +881,4 @@ main() {
 }
 
 # Run main function
-main  
+main        
