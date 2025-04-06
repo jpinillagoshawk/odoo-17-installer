@@ -592,6 +592,16 @@ extract_enterprise() {
 
     # Validate move
     validate "Enterprise addons availability" "[ -n '$(ls -A $INSTALL_DIR/enterprise/)' ]" "Enterprise addons directory is empty"
+    
+    log INFO "Installing required Python packages..."
+    echo -e "${CYAN}Installing required Python packages...${RESET}"
+    if [ -f "$INSTALL_DIR/requirements.txt" ]; then
+        pip3 install -r "$INSTALL_DIR/requirements.txt"
+        validate "Python packages installation" "pip3 list | grep -q pycryptodome" "Failed to install required Python packages"
+        log INFO "Required Python packages installed successfully"
+        echo -e "${GREEN}${BOLD}✓${RESET} Required Python packages installed successfully"
+    fi
+    
     log INFO "Enterprise addons extracted successfully"
     echo -e "${GREEN}${BOLD}✓${RESET} Enterprise addons extracted successfully"
 }
@@ -979,4 +989,4 @@ main() {
 }
 
 # Run main function
-main                                            
+main                                                                                        

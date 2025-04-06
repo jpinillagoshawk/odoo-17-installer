@@ -187,6 +187,7 @@ cleanup_and_restart() {
 restore_backup() {
     local backup_file=$1
     local current_dir=$(pwd)
+    local detected_db_name=""
     
     if [ ! -f "$backup_file" ]; then
         echo "Error: Backup file not found: $backup_file"
@@ -212,10 +213,25 @@ restore_backup() {
         echo "Found backup in custom format (dump.backup)"
         DUMP_FILE="dump.backup"
         IS_CUSTOM_FORMAT=true
+        
+        echo "Analyzing dump file to detect database properties..."
+        if command -v strings >/dev/null 2>&1 && strings "$TEMP_DIR/$DUMP_FILE" | grep -q "@.*-.*\.odoo\.com"; then
+            detected_db_name=$(strings "$TEMP_DIR/$DUMP_FILE" | grep -m1 "@.*-.*\.odoo\.com" | sed -E 's/.*@[^-]+-([^.]+)\.odoo\.com.*/postgres_\1/')
+            echo "Detected database name from dump: $detected_db_name"
+        fi
     elif [ -f "$TEMP_DIR/dump.sql" ]; then
         echo "Found backup in SQL format (dump.sql)"
         DUMP_FILE="dump.sql"
         IS_CUSTOM_FORMAT=false
+        
+        echo "Analyzing dump file to detect database properties..."
+        if grep -q "postgres_[a-zA-Z0-9_-]*" "$TEMP_DIR/$DUMP_FILE"; then
+            detected_db_name=$(grep -m1 "postgres_[a-zA-Z0-9_-]*" "$TEMP_DIR/$DUMP_FILE" | grep -o "postgres_[a-zA-Z0-9_-]*" | head -1)
+            echo "Detected database name from dump: $detected_db_name"
+        elif grep -q "@.*-.*\.odoo\.com" "$TEMP_DIR/$DUMP_FILE"; then
+            detected_db_name=$(grep -m1 "@.*-.*\.odoo\.com" "$TEMP_DIR/$DUMP_FILE" | sed -E 's/.*@[^-]+-([^.]+)\.odoo\.com.*/postgres_\1/')
+            echo "Detected database name from email domain in dump: $detected_db_name"
+        fi
     else
         echo "Error: Invalid backup format. Missing dump.backup or dump.sql file"
         rm -rf "$TEMP_DIR"
@@ -230,6 +246,34 @@ restore_backup() {
     
     # Change to INSTALL_DIR for docker-compose commands
     cd "$INSTALL_DIR"
+    
+    if [ -n "$detected_db_name" ] && [ "$detected_db_name" != "$DB_NAME" ]; then
+        echo "Warning: Detected database name ($detected_db_name) does not match current configuration ($DB_NAME)"
+        echo "Updating configuration files to match the database dump..."
+        
+        local detected_client_name=$(echo "$detected_db_name" | sed -E 's/postgres_(.+)/\1/')
+        
+        echo "Updating docker-compose.yml..."
+        sed -i "s/container_name: odoo17-[a-zA-Z0-9_-]*/container_name: odoo17-$detected_client_name/" docker-compose.yml
+        sed -i "s/container_name: db-[a-zA-Z0-9_-]*/container_name: db-$detected_client_name/" docker-compose.yml
+        sed -i "s/POSTGRES_DB=postgres_[a-zA-Z0-9_-]*/POSTGRES_DB=$detected_db_name/" docker-compose.yml
+        sed -i "s/command: -- --init=base -d postgres_[a-zA-Z0-9_-]*/command: -- --init=base -d $detected_db_name/" docker-compose.yml 2>/dev/null || true
+        
+        echo "Updating odoo.conf..."
+        sed -i "s/db_name = postgres_[a-zA-Z0-9_-]*/db_name = $detected_db_name/" config/odoo.conf 2>/dev/null || true
+        
+        echo "Updating backup.sh script..."
+        local temp_backup_script=$(mktemp)
+        cat backup.sh | sed "s/CONTAINER_NAME=\"odoo17-[a-zA-Z0-9_-]*\"/CONTAINER_NAME=\"odoo17-$detected_client_name\"/" | \
+                       sed "s/DB_CONTAINER=\"db-[a-zA-Z0-9_-]*\"/DB_CONTAINER=\"db-$detected_client_name\"/" | \
+                       sed "s/DB_NAME=\"postgres_[a-zA-Z0-9_-]*\"/DB_NAME=\"$detected_db_name\"/" > "$temp_backup_script"
+        cat "$temp_backup_script" > backup.sh
+        rm "$temp_backup_script"
+        
+        CONTAINER_NAME="odoo17-$detected_client_name"
+        DB_CONTAINER="db-$detected_client_name"
+        DB_NAME="$detected_db_name"
+    fi
     
     # Stop containers
     echo "Stopping services..."
