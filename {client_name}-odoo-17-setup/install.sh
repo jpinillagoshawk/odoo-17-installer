@@ -212,7 +212,7 @@ validate_installation_path() {
         echo -e "${YELLOW}Solution: Update 'path_to_install' in your configuration file to an existing directory.${RESET}"
         exit 1
     fi
-    
+
     if [ ! -w "$(dirname "$INSTALL_DIR")" ]; then
         log ERROR "No write permission to $(dirname "$INSTALL_DIR")"
         echo -e "${RED}${BOLD}⚠ Cannot create directories in $(dirname "$INSTALL_DIR")${RESET}"
@@ -225,7 +225,7 @@ validate_installation_path() {
 validate_docker_volumes() {
     local test_dir="$INSTALL_DIR/volumes/test_docker_volume"
     mkdir -p "$test_dir"
-    
+
     if [ ! -d "$test_dir" ]; then
         log ERROR "Failed to create test directory for Docker volumes: $test_dir"
         echo -e "${RED}${BOLD}⚠ Failed to create test directory for Docker volumes${RESET}"
@@ -233,13 +233,13 @@ validate_docker_volumes() {
         echo -e "${YELLOW}Solution: Check that the path is on a supported filesystem and has proper permissions.${RESET}"
         exit 1
     fi
-    
+
     rmdir "$test_dir"
 }
 
 check_docker() {
     log INFO "Checking Docker availability..."
-    
+
     if ! command -v docker &>/dev/null; then
         log ERROR "Docker is not installed"
         echo -e "${RED}${BOLD}⚠ Docker is not installed${RESET}"
@@ -248,7 +248,7 @@ check_docker() {
         echo -e "${YELLOW}https://docs.docker.com/engine/install/${RESET}"
         exit 1
     fi
-    
+
     if ! command -v docker-compose &>/dev/null; then
         log ERROR "Docker Compose is not installed"
         echo -e "${RED}${BOLD}⚠ Docker Compose is not installed${RESET}"
@@ -257,7 +257,7 @@ check_docker() {
         echo -e "${YELLOW}https://docs.docker.com/compose/install/${RESET}"
         exit 1
     fi
-    
+
     if ! docker info &>/dev/null; then
         log ERROR "Docker daemon is not running"
         echo -e "${RED}${BOLD}⚠ Docker daemon is not running${RESET}"
@@ -265,7 +265,7 @@ check_docker() {
         echo -e "${YELLOW}sudo systemctl start docker${RESET}"
         exit 1
     fi
-    
+
     if ! docker ps &>/dev/null; then
         log WARNING "Current user may not have permission to run Docker"
         echo -e "${YELLOW}${BOLD}⚠ Current user may not have permission to run Docker${RESET}"
@@ -273,14 +273,14 @@ check_docker() {
         echo -e "${YELLOW}sudo usermod -aG docker $USER${RESET}"
         echo -e "${YELLOW}Then log out and log back in, or run this script with sudo${RESET}"
     fi
-    
+
     log INFO "Docker is available and running"
 }
 
 # Analyze system
 analyze_system() {
     show_progress "Analyzing System"
-    
+
     check_docker
 
     log INFO "Gathering system information..."
@@ -457,7 +457,7 @@ create_directories() {
     log INFO "Creating directory structure..."
 
     validate_installation_path
-    
+
     validate_docker_volumes
 
     # Create all required directories with proper structure
@@ -602,20 +602,36 @@ create_backup_script() {
 
     log INFO "Creating scripts..."
 
-    # Copy the existing backup script
-    cp backup.sh "$INSTALL_DIR/backup.sh"
+    if [ ! -f "$INSTALL_DIR/backup.sh" ]; then
+        cp backup.sh "$INSTALL_DIR/backup.sh"
+        log INFO "Copied backup.sh to $INSTALL_DIR"
+    else
+        log INFO "backup.sh already exists in $INSTALL_DIR, skipping copy"
+    fi
     chmod +x "$INSTALL_DIR/backup.sh"
 
-    # Copy staging script
-    cp staging.sh "$INSTALL_DIR/staging.sh"
+    if [ ! -f "$INSTALL_DIR/staging.sh" ]; then
+        cp staging.sh "$INSTALL_DIR/staging.sh"
+        log INFO "Copied staging.sh to $INSTALL_DIR"
+    else
+        log INFO "staging.sh already exists in $INSTALL_DIR, skipping copy"
+    fi
     chmod +x "$INSTALL_DIR/staging.sh"
 
-    cp git_panel.sh "$INSTALL_DIR/git_panel.sh"
+    if [ ! -f "$INSTALL_DIR/git_panel.sh" ]; then
+        cp git_panel.sh "$INSTALL_DIR/git_panel.sh"
+        log INFO "Copied git_panel.sh to $INSTALL_DIR"
+    else
+        log INFO "git_panel.sh already exists in $INSTALL_DIR, skipping copy"
+    fi
     chmod +x "$INSTALL_DIR/git_panel.sh"
 
-    # Copy SSL setup script if it exists
-    if [ -f "ssl-setup.sh" ]; then
+    if [ -f "ssl-setup.sh" ] && [ ! -f "$INSTALL_DIR/ssl-setup.sh" ]; then
         cp ssl-setup.sh "$INSTALL_DIR/ssl-setup.sh"
+        log INFO "Copied ssl-setup.sh to $INSTALL_DIR"
+        chmod +x "$INSTALL_DIR/ssl-setup.sh"
+    elif [ -f "ssl-setup.sh" ]; then
+        log INFO "ssl-setup.sh already exists in $INSTALL_DIR, skipping copy"
         chmod +x "$INSTALL_DIR/ssl-setup.sh"
     fi
 
@@ -965,7 +981,7 @@ main() {
     log INFO "Starting Docker containers automatically for plug-and-play experience"
     echo -e "${CYAN}Starting Docker containers...${RESET}"
     cd "$INSTALL_DIR" && docker-compose up -d
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Docker containers started successfully!${RESET}"
         echo -e "${GREEN}You can access Odoo at http://localhost:{odoo_port}${RESET}"
@@ -973,10 +989,10 @@ main() {
         echo -e "${RED}Failed to start Docker containers. Please check the logs.${RESET}"
         echo -e "${YELLOW}You can manually start them with: cd $INSTALL_DIR && docker-compose up -d${RESET}"
     fi
-    
+
     log INFO "Installation completed successfully"
     show_completion
 }
 
 # Run main function
-main                                            
+main                                                                                        
