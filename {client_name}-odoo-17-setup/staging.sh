@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Constants
-INSTALL_DIR="/{client_name}-odoo-17"
+INSTALL_DIR="/home/ubuntu/repos/rincondelmotor-odoo-17"
 STAGING_DIR="$INSTALL_DIR/staging"
-SERVER_IP={ip}
-BASE_PORT={odoo_port}
+SERVER_IP=localhost
+BASE_PORT=8069
 LONGPOLLING_PORT=8072
-POSTGRES_PORT={db_port}
+POSTGRES_PORT=5432
 GIT_CONFIG_FILE="$INSTALL_DIR/.git_config"
 MAIN_BRANCH="main"
 
@@ -45,12 +45,12 @@ get_next_number() {
     local max=0
     
     # Check for existing containers instead of directories
-    if docker ps -a --format '{{.Names}}' | grep -q "^odoo17-{client_name}-staging$"; then
+    if docker ps -a --format '{{.Names}}' | grep -q "^odoo17-rincondelmotor-staging$"; then
         max=1
     fi
     
     # Check for numbered staging instances
-    docker ps -a --format '{{.Names}}' | grep "^odoo17-{client_name}-staging-[0-9]*$" | while read -r container; do
+    docker ps -a --format '{{.Names}}' | grep "^odoo17-rincondelmotor-staging-[0-9]*$" | while read -r container; do
         num=$(echo "$container" | grep -o '[0-9]*$')
         if [ -n "$num" ] && [ "$num" -gt "$max" ]; then
             max=$num
@@ -61,7 +61,7 @@ get_next_number() {
     for d in "$STAGING_DIR"/staging*; do
         if [ -d "$d" ]; then
             name=$(basename "$d")
-            if ! docker ps -a --format '{{.Names}}' | grep -q "^odoo17-{client_name}-$name$"; then
+            if ! docker ps -a --format '{{.Names}}' | grep -q "^odoo17-rincondelmotor-$name$"; then
                 echo "Cleaning up orphaned staging directory: $d"
                 rm -rf "$d"
             fi
@@ -174,7 +174,11 @@ create_git_branch() {
         return 1
     fi
     
+    local current_branch=$(git rev-parse --abbrev-ref HEAD)
+    
+    git fetch origin $MAIN_BRANCH
     git checkout $MAIN_BRANCH
+    git pull origin $MAIN_BRANCH
     
     local branch_name="staging-$name"
     
@@ -186,9 +190,10 @@ create_git_branch() {
         git checkout "$branch_name"
     fi
     
+    mkdir -p "$staging_dir"
     echo "$branch_name" > "$staging_dir/.git_branch"
     
-    git checkout $MAIN_BRANCH
+    git checkout "$current_branch"
     
     echo "Git branch '$branch_name' created and associated with staging environment '$name'"
     return 0
@@ -241,7 +246,7 @@ create_staging() {
     # Update odoo.conf
     echo "Configuring odoo.conf..."
     local config_file="$STAGING_DIR/$name/config/odoo.conf"
-    sed -i "s/^db_name =.*/db_name = postgres_{client_name}_$name/" "$config_file"
+    sed -i "s/^db_name =.*/db_name = postgres_rincondelmotor_$name/" "$config_file"
     
     # Update docker-compose.yml
     echo "Configuring docker-compose.yml..."
@@ -255,12 +260,12 @@ create_staging() {
         if [[ $line =~ .*"0.0.0.0:"[0-9]+":8069".* ]]; then
             # Map web port
             echo "      - \"0.0.0.0:$web_port:8069\"" >> "$temp_file"
-        elif [[ $line == *"container_name: odoo17-{client_name}"* ]]; then
-            echo "    container_name: odoo17-{client_name}-$name" >> "$temp_file"
-        elif [[ $line == *"container_name: db-{client_name}"* ]]; then
-            echo "    container_name: db-{client_name}-$name" >> "$temp_file"
-        elif [[ $line == *"POSTGRES_DB=postgres_{client_name}"* ]]; then
-            echo "      - POSTGRES_DB=postgres_{client_name}_$name" >> "$temp_file"
+        elif [[ $line == *"container_name: odoo17-rincondelmotor"* ]]; then
+            echo "    container_name: odoo17-rincondelmotor-$name" >> "$temp_file"
+        elif [[ $line == *"container_name: db-rincondelmotor"* ]]; then
+            echo "    container_name: db-rincondelmotor-$name" >> "$temp_file"
+        elif [[ $line == *"POSTGRES_DB=postgres_rincondelmotor"* ]]; then
+            echo "      - POSTGRES_DB=postgres_rincondelmotor_$name" >> "$temp_file"
         elif [[ $line == *"depends_on:"* ]]; then
             echo "    depends_on:" >> "$temp_file"
             read -r next_line
@@ -309,15 +314,15 @@ create_staging() {
     
     # Stop Odoo container to ensure consistent backup
     echo "  Stopping production Odoo for consistent backup..."
-    docker stop odoo17-{client_name}
+    docker stop odoo17-rincondelmotor
     
     # Copy filestore with proper database name
     echo "  Copying filestore..."
-    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
-    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/postgres_{client_name}/." \
-        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name/"; then
+    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_rincondelmotor_$name"
+    if ! docker cp "odoo17-rincondelmotor:/var/lib/odoo/filestore/postgres_rincondelmotor/." \
+        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_rincondelmotor_$name/"; then
         echo "Error: Failed to copy filestore"
-        docker start odoo17-{client_name}
+        docker start odoo17-rincondelmotor
         exit 1
     fi
     
@@ -328,34 +333,34 @@ create_staging() {
     # Simple direct database clone
     echo "  Creating staging database..."
     # First drop the database if it exists (outside transaction)
-    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "DROP DATABASE IF EXISTS postgres_{client_name}_$name;" 2>/dev/null
+    docker exec db-rincondelmotor-$name psql -U odoo -d template1 -q -c "DROP DATABASE IF EXISTS postgres_rincondelmotor_$name;" 2>/dev/null
     # Create empty database
-    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "CREATE DATABASE postgres_{client_name}_$name WITH TEMPLATE template0 OWNER odoo LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8';" 2>/dev/null
+    docker exec db-rincondelmotor-$name psql -U odoo -d template1 -q -c "CREATE DATABASE postgres_rincondelmotor_$name WITH TEMPLATE template0 OWNER odoo LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8';" 2>/dev/null
     
     # Now dump and restore
     echo "  Restoring database (this may take a while)..."
-    if ! docker exec db-{client_name} pg_dump -U odoo -Fc -Z0 postgres_{client_name} > "/tmp/odoo_staging_$$.dump"; then
+    if ! docker exec db-rincondelmotor pg_dump -U odoo -Fc -Z0 postgres_rincondelmotor > "/tmp/odoo_staging_$$.dump"; then
         echo "Error: Failed to dump database"
-        docker start odoo17-{client_name}
+        docker start odoo17-rincondelmotor
         rm -f "/tmp/odoo_staging_$$.dump"
         exit 1
     fi
     
-    if ! docker exec -i db-{client_name}-$name pg_restore -U odoo -d postgres_{client_name}_$name --no-owner --no-privileges --clean --if-exists < "/tmp/odoo_staging_$$.dump" 2>/dev/null; then
+    if ! docker exec -i db-rincondelmotor-$name pg_restore -U odoo -d postgres_rincondelmotor_$name --no-owner --no-privileges --clean --if-exists < "/tmp/odoo_staging_$$.dump" 2>/dev/null; then
         echo "Warning: Some non-critical errors occurred during restore"
     fi
     rm -f "/tmp/odoo_staging_$$.dump"
     
     # Verify database was restored properly
-    if ! docker exec db-{client_name}-$name psql -U odoo -d postgres_{client_name}_$name -q -t -c "SELECT COUNT(*) FROM res_users;" 2>/dev/null | grep -q '[1-9]'; then
+    if ! docker exec db-rincondelmotor-$name psql -U odoo -d postgres_rincondelmotor_$name -q -t -c "SELECT COUNT(*) FROM res_users;" 2>/dev/null | grep -q '[1-9]'; then
         echo "Error: Database restore failed - database appears empty"
-        docker start odoo17-{client_name}
+        docker start odoo17-rincondelmotor
         exit 1
     fi
     
     # Restart production Odoo
     echo "  Restarting production Odoo..."
-    docker start odoo17-{client_name}
+    docker start odoo17-rincondelmotor
 
     # Start Odoo service first
     echo "Starting Odoo service..."
@@ -367,10 +372,10 @@ create_staging() {
 
     # Now neutralize the database
     echo "  Neutralizing database..."
-    docker exec odoo17-{client_name}-$name odoo neutralize --database postgres_{client_name}_$name
+    docker exec odoo17-rincondelmotor-$name odoo neutralize --database postgres_rincondelmotor_$name
 
     # Update base URL and configure ribbon (specific to our setup)
-    docker exec db-{client_name}-$name psql -U odoo postgres_{client_name}_$name << EOF
+    docker exec db-rincondelmotor-$name psql -U odoo postgres_rincondelmotor_$name << EOF
 BEGIN;
 
 -- Mark web_environment_ribbon for installation
@@ -384,17 +389,17 @@ EOF
 
     # Install ribbon module
     echo "  Installing ribbon module..."
-    docker exec odoo17-{client_name}-$name odoo -d postgres_{client_name}_$name -i web_environment_ribbon --stop-after-init >/dev/null 2>&1
+    docker exec odoo17-rincondelmotor-$name odoo -d postgres_rincondelmotor_$name -i web_environment_ribbon --stop-after-init >/dev/null 2>&1
 
     # Configure ribbon after installation
     echo "  Configuring ribbon..."
-    docker exec db-{client_name}-staging psql -U odoo -d postgres_{client_name}_$name -c "UPDATE ir_config_parameter 
+    docker exec db-rincondelmotor-staging psql -U odoo -d postgres_rincondelmotor_$name -c "UPDATE ir_config_parameter 
 SET value = REPEAT('=', (23 - LENGTH('$name'))/2+1) || '⚠️ ' || UPPER('$name') || ' ⚠️.. NOT FOR PRODUCTION' || REPEAT('=', (23 - LENGTH('$name'))/2)
 WHERE key = 'ribbon.name';" >/dev/null 2>&1
 
     # Update module to apply configuration
     echo "  Update ribbon module..."
-    docker exec odoo17-{client_name}-$name odoo -d postgres_{client_name}_$name -u web_environment_ribbon --stop-after-init >/dev/null 2>&1
+    docker exec odoo17-rincondelmotor-$name odoo -d postgres_rincondelmotor_$name -u web_environment_ribbon --stop-after-init >/dev/null 2>&1
 
     # Restart to ensure clean state
     echo "Restarting service..."
@@ -406,7 +411,7 @@ WHERE key = 'ribbon.name';" >/dev/null 2>&1
     echo "Staging environment created successfully:"
     echo "  Path: $STAGING_DIR/$name"
     echo "  Web port: $web_port (http://localhost:$web_port)"
-    echo "  Database: postgres_{client_name}_$name"
+    echo "  Database: postgres_rincondelmotor_$name"
     echo "  Status: Running"
 }
 
@@ -421,7 +426,7 @@ list_stagings() {
             echo "Name: $name"
             
             # Get container status
-            if docker ps -q --filter "name=odoo17-{client_name}-$name" | grep -q .; then
+            if docker ps -q --filter "name=odoo17-rincondelmotor-$name" | grep -q .; then
                 echo "Status: Running"
             else
                 echo "Status: Stopped"
@@ -590,12 +595,12 @@ update_staging() {
     sed -i "s/:$BASE_PORT\"/:$web_port\"/g" "$compose_file"
     sed -i "s/:$LONGPOLLING_PORT\"/:$long_port\"/g" "$compose_file"
     sed -i "s/:$POSTGRES_PORT\"/:$pg_port\"/g" "$compose_file"
-    sed -i "s/container_name: odoo17-{client_name}/container_name: odoo17-{client_name}-$name/g" "$compose_file"
-    sed -i "s/container_name: db-{client_name}/container_name: db-{client_name}-$name/g" "$compose_file"
-    sed -i "s/POSTGRES_DB=postgres_{client_name}/POSTGRES_DB=postgres_{client_name}_$name/g" "$compose_file"
+    sed -i "s/container_name: odoo17-rincondelmotor/container_name: odoo17-rincondelmotor-$name/g" "$compose_file"
+    sed -i "s/container_name: db-rincondelmotor/container_name: db-rincondelmotor-$name/g" "$compose_file"
+    sed -i "s/POSTGRES_DB=postgres_rincondelmotor/POSTGRES_DB=postgres_rincondelmotor_$name/g" "$compose_file"
     
     # Update base URL and report URL
-    docker exec db-{client_name}-$name psql -U odoo postgres_{client_name}_$name << EOF
+    docker exec db-rincondelmotor-$name psql -U odoo postgres_rincondelmotor_$name << EOF
 BEGIN;
 
 -- Update base URL and report URL
@@ -610,19 +615,19 @@ EOF
 
     # Sync filestore
     echo "Syncing filestore..."
-    docker stop odoo17-{client_name}
+    docker stop odoo17-rincondelmotor
     
     # Clear and recreate filestore directory for clean sync
-    rm -rf "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
-    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
+    rm -rf "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_rincondelmotor_$name"
+    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_rincondelmotor_$name"
     
     # Copy updated filestore
-    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/postgres_{client_name}/." \
-        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name/"; then
+    if ! docker cp "odoo17-rincondelmotor:/var/lib/odoo/filestore/postgres_rincondelmotor/." \
+        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_rincondelmotor_$name/"; then
         echo "Warning: Failed to sync filestore"
     fi
     
-    docker start odoo17-{client_name}
+    docker start odoo17-rincondelmotor
     
     # Reapply all permissions (matching install.sh)
     chown -R 101:101 "$STAGING_DIR/$name/volumes/odoo-data"
@@ -643,8 +648,8 @@ cleanup_staging() {
         
         # Stop and remove all staging containers
         echo "Stopping and removing staging containers..."
-        if docker ps -a | grep -q "{client_name}-staging"; then
-            docker ps -a | grep "{client_name}-staging" | awk '{print $1}' | xargs -r docker rm -f
+        if docker ps -a | grep -q "rincondelmotor-staging"; then
+            docker ps -a | grep "rincondelmotor-staging" | awk '{print $1}' | xargs -r docker rm -f
         else
             echo "No staging containers found."
         fi
@@ -687,8 +692,8 @@ cleanup_staging() {
         
         # Stop and remove containers
         echo "Stopping and removing containers..."
-        if docker ps -a | grep -q "{client_name}-$name\$"; then
-            docker ps -a | grep "{client_name}-$name\$" | awk '{print $1}' | xargs -r docker rm -f
+        if docker ps -a | grep -q "rincondelmotor-$name\$"; then
+            docker ps -a | grep "rincondelmotor-$name\$" | awk '{print $1}' | xargs -r docker rm -f
         else
             echo "No containers found for staging '$name'."
         fi
@@ -758,4 +763,4 @@ case "$1" in
     *)
         usage
         ;;
-esac          
+esac                    
