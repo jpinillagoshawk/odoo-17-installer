@@ -94,7 +94,7 @@ create_backup() {
 
     # Stop Odoo container for consistent backup
     echo "Stopping Odoo service..."
-    docker-compose stop web || backup_failed=true
+    docker stop $CONTAINER_NAME || backup_failed=true
 
     # Use trap to ensure cleanup on exit
     trap 'cleanup_and_restart "$current_dir" "$backup_file" "$backup_failed" "$TEMP_DIR/filestore"' EXIT
@@ -157,7 +157,20 @@ cleanup_and_restart() {
     # Always try to restart Odoo
     echo "Ensuring Odoo service is running..."
     cd "$INSTALL_DIR"
-    docker-compose start web
+    docker start $CONTAINER_NAME || docker run -d --name $CONTAINER_NAME \
+        --link $DB_CONTAINER:db \
+        -p 8069:8069 \
+        -v "$INSTALL_DIR/config:/etc/odoo" \
+        -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
+        -v "$INSTALL_DIR/enterprise:/mnt/enterprise" \
+        -v "$INSTALL_DIR/addons:/mnt/extra-addons" \
+        -v "$INSTALL_DIR/logs:/var/log/odoo" \
+        -e HOST=db \
+        -e PORT=5432 \
+        -e USER=$DB_USER \
+        -e PASSWORD={client_password} \
+        -e PROXY_MODE=True \
+        odoo:17.0 -- --init=base -d $DB_NAME
 
     # If backup failed, remove the partial backup file and clean temporary filestore
     if [ "$failed" = true ]; then
@@ -289,11 +302,19 @@ restore_backup() {
 
     # Stop containers
     echo "Stopping services..."
-    docker-compose down
+    docker stop $CONTAINER_NAME $DB_CONTAINER || true
+    docker rm $CONTAINER_NAME $DB_CONTAINER || true
 
     # Start database container
     echo "Starting database..."
-    docker-compose up -d db
+    cd "$INSTALL_DIR"
+    docker run -d --name $DB_CONTAINER \
+        -e POSTGRES_DB=$DB_NAME \
+        -e POSTGRES_PASSWORD={client_password} \
+        -e POSTGRES_USER=$DB_USER \
+        -e PGDATA=/var/lib/postgresql/data/pgdata \
+        -v "$INSTALL_DIR/volumes/postgres-data:/var/lib/postgresql/data/pgdata" \
+        postgres:15
     sleep 10
 
     # Recreate database
@@ -325,11 +346,25 @@ restore_backup() {
 
     # Start all services
     echo "Starting services..."
-    docker-compose up -d
+    cd "$INSTALL_DIR"
+    docker run -d --name $CONTAINER_NAME \
+        --link $DB_CONTAINER:db \
+        -p 8069:8069 \
+        -v "$INSTALL_DIR/config:/etc/odoo" \
+        -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
+        -v "$INSTALL_DIR/enterprise:/mnt/enterprise" \
+        -v "$INSTALL_DIR/addons:/mnt/extra-addons" \
+        -v "$INSTALL_DIR/logs:/var/log/odoo" \
+        -e HOST=db \
+        -e PORT=5432 \
+        -e USER=$DB_USER \
+        -e PASSWORD={client_password} \
+        -e PROXY_MODE=True \
+        odoo:17.0 -- --init=base -d $DB_NAME
 
     # Wait for services to be ready
     echo "Waiting for services to start..."
-    sleep 10
+    sleep 20
 
     # Return to original directory
     cd "$current_dir"
