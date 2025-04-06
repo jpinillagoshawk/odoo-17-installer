@@ -36,8 +36,8 @@ import socket
 import configparser
 from pathlib import Path
 
-# Template directory name
 TEMPLATE_NAME = "{client_name}-odoo-17-setup"
+INSTALL_DIR_NAME = "{client_name}-odoo-17"
 
 # Files to be copied and modified
 FILES_TO_COPY = [
@@ -118,34 +118,58 @@ def get_public_ip():
         print("Warning: Could not determine public IP. Using default.")
         return "195.190.194.108"
 
+def normalize_install_path(config):
+    """Create a normalized installation path from configuration"""
+    client_name = config['client_name']
+    base_path = os.path.normpath(config['path_to_install'])
+    if not base_path:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    return os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
+
 def load_config(config_file):
-    """Load configuration from file"""
+    """Load configuration from file with enhanced validation"""
     if not os.path.exists(config_file):
         print(f"Error: Config file not found: {config_file}")
+        print(f"Tip: Create a config file using the template or run: python {sys.argv[0]} --create-config")
         sys.exit(1)
 
     # Use configparser for more robust parsing
     config = configparser.ConfigParser()
 
     # Add a default section since our config file doesn't have sections
-    with open(config_file, 'r') as f:
-        config_content = '[DEFAULT]\n' + f.read()
+    try:
+        with open(config_file, 'r') as f:
+            config_content = '[DEFAULT]\n' + f.read()
+    except Exception as e:
+        print(f"Error reading config file: {e}")
+        print(f"Tip: Check file permissions and encoding")
+        sys.exit(1)
 
     config.read_string(config_content)
 
     # Extract values with defaults
     result = dict(DEFAULT_CONFIG)
 
-    # Required values
-    if 'client_name' not in config['DEFAULT']:
-        print("Error: client_name is required in config file")
+    required_fields = ['client_name', 'client_password']
+    missing_fields = []
+    
+    for field in required_fields:
+        if field not in config['DEFAULT'] or not config['DEFAULT'][field]:
+            missing_fields.append(field)
+    
+    if missing_fields:
+        print(f"Error: The following required fields are missing in the config file: {', '.join(missing_fields)}")
+        print(f"Tip: Edit {config_file} and add values for these fields")
         sys.exit(1)
 
-    if 'client_password' not in config['DEFAULT']:
-        print("Error: client_password is required in config file")
+    client_name = config['DEFAULT']['client_name'].lower()
+    if not client_name.isalnum():
+        print("Error: client_name must contain only alphanumeric characters")
+        print("Tip: Use letters and numbers only, no spaces or special characters")
         sys.exit(1)
-
-    result['client_name'] = config['DEFAULT']['client_name'].lower()
+    result['client_name'] = client_name
+    
     result['client_password'] = config['DEFAULT']['client_password']
 
     # Optional values with defaults
@@ -155,16 +179,49 @@ def load_config(config_file):
 
     # If IP is empty, determine it
     if not result['ip']:
-        result['ip'] = get_public_ip()
+        try:
+            result['ip'] = get_public_ip()
+        except Exception as e:
+            print(f"Warning: Could not determine public IP: {e}")
+            print("Using localhost as fallback")
+            result['ip'] = 'localhost'
 
-    # If path_to_install is empty, use execution path
     if not result['path_to_install']:
         result['path_to_install'] = os.path.dirname(os.path.abspath(__file__))
+    else:
+        if not os.path.isabs(result['path_to_install']):
+            result['path_to_install'] = os.path.abspath(os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                result['path_to_install']
+            ))
+    
+    if not os.path.exists(result['path_to_install']):
+        print(f"Error: Installation path does not exist: {result['path_to_install']}")
+        print(f"Tip: Create the directory first or specify a different path")
+        sys.exit(1)
+    
+    if not os.access(result['path_to_install'], os.W_OK):
+        print(f"Error: No write permission to installation path: {result['path_to_install']}")
+        print(f"Tip: Change directory permissions or specify a different path")
+        sys.exit(1)
 
     # Validate password (at least 8 characters)
     if len(result['client_password']) < 8:
         print("Error: Password must be at least 8 characters long")
+        print("Tip: Choose a stronger password with at least 8 characters")
         sys.exit(1)
+
+    for port_key in ['http_port', 'https_port', 'longpolling_port']:
+        if port_key in result and result[port_key]:
+            try:
+                port = int(result[port_key])
+                if port < 1 or port > 65535:
+                    raise ValueError("Port out of range")
+                result[port_key] = str(port)  # Ensure it's a string
+            except ValueError:
+                print(f"Error: Invalid {port_key}: {result[port_key]}")
+                print("Tip: Port must be a number between 1 and 65535")
+                sys.exit(1)
 
     return result
 
@@ -260,7 +317,11 @@ def fix_readme_installation_steps(file_path, config):
     client_name = config['client_name']
     user = config['user']
     ip = config['ip']
-    install_path = os.path.join(config['path_to_install'], f"{client_name}-odoo-17")
+    base_path = os.path.normpath(config['path_to_install'])
+    if not base_path:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    install_path = os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
 
     # Create corrected installation steps
     corrected_steps = f'''1. Clone this repository to `{install_path}`:
@@ -330,9 +391,10 @@ def update_staging_script(file_path, config):
 
     # Ensure server configuration parameters are correctly set
     client_name = config['client_name']
+    install_path = normalize_install_path(config)
 
     # Explicitly replace configuration values in staging.sh header
-    content = re.sub(r'INSTALL_DIR="[^"]*"', f'INSTALL_DIR="/{client_name}-odoo-17"', content)
+    content = re.sub(r'INSTALL_DIR="[^"]*"', f'INSTALL_DIR="{install_path}"', content)
     content = re.sub(r'SERVER_IP=[^\n]*', f'SERVER_IP={config["ip"]}', content)
     content = re.sub(r'BASE_PORT=[^\n]*', f'BASE_PORT={config["odoo_port"]}', content)
     content = re.sub(r'POSTGRES_PORT=[^\n]*', f'POSTGRES_PORT={config["db_port"]}', content)
@@ -350,7 +412,7 @@ def modify_file(file_path, config):
 
     client_name = config['client_name']
     client_password = config['client_password']
-    install_path = os.path.join(config['path_to_install'], f"{client_name}-odoo-17")
+    install_path = normalize_install_path(config)
 
     # Read file content
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
@@ -385,29 +447,34 @@ def modify_file(file_path, config):
     content = content.replace('{odoo_port}', config['odoo_port'])
     content = content.replace('{db_port}', config['db_port'])
 
-    # Special case for file paths in install.sh
-    if file_path.endswith('install.sh'):
-        # Replace the install directory constant
-        content = content.replace('INSTALL_DIR="/odoo17"', f'INSTALL_DIR="{install_path}"')
-        content = content.replace('INSTALL_DIR="/{client_name}-odoo-17"', f'INSTALL_DIR="/{client_name}-odoo-17"')
+    path_to_install = os.path.normpath(config['path_to_install'])
+    content = content.replace('{path_to_install}', path_to_install)
+    
+    if file_path.endswith('install.sh') or file_path.endswith('backup.sh') or file_path.endswith('git_panel.sh') or file_path.endswith('staging.sh'):
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            if line.strip().startswith('INSTALL_DIR='):
+                clean_path = os.path.normpath(f"{path_to_install}/{client_name}-odoo-17")
+                lines[i] = f'INSTALL_DIR="{clean_path}"'
+                if i+1 < len(lines) and 'sed' in lines[i+1] and 'INSTALL_DIR' in lines[i+1]:
+                    lines[i+1] = ''
+                break
+        content = '\n'.join(lines)
 
-        # Update DB_USER if needed
-        if config['db_user'] != 'odoo':
-            content = content.replace('DB_USER="odoo"', f'DB_USER="{config["db_user"]}"')
+    # Update DB_USER if needed
+    if config['db_user'] != 'odoo':
+        content = re.sub(r'DB_USER="odoo"', f'DB_USER="{config["db_user"]}"', content)
 
-    # Update paths in any file
-    content = content.replace('/odoo17/', f'/{client_name}-odoo-17/')
-    content = content.replace('/odoo17"', f'/{client_name}-odoo-17"')
-    content = content.replace('/odoo17 ', f'/{client_name}-odoo-17 ')
-
-    # Direct string replacements for {client_name} literal
     content = content.replace('{client_name}', client_name)
     content = content.replace('{client_password}', client_password)
-
-    # Update paths in any file
-    content = content.replace('/odoo17/', f'/{client_name}-odoo-17/')
-    content = content.replace('/odoo17"', f'/{client_name}-odoo-17"')
-    content = content.replace('/odoo17 ', f'/{client_name}-odoo-17 ')
+    
+    path_patterns = [
+        (r'/odoo17(?=/|"|$| )', f'{install_path}'),
+        (r'/{0}-odoo-17(?=/|"|$| )'.format(re.escape(client_name)), f'{install_path}')
+    ]
+    
+    for pattern, replacement in path_patterns:
+        content = re.sub(pattern, replacement, content)
 
     # Write modified content back to file
     with open(file_path, 'w', encoding='utf-8') as file:
@@ -469,8 +536,13 @@ def main():
     template_dir = os.path.join(current_dir, TEMPLATE_NAME)
 
     # Define the target directory for the new client
-    target_dir = os.path.join(current_dir, f"{config['client_name']}-odoo-17-setup")
-
+    if config['path_to_install']:
+        base_path = os.path.normpath(config['path_to_install'])
+    else:
+        base_path = current_dir
+    
+    target_dir = normalize_install_path(config)
+    
     # Check if target directory already exists
     if os.path.exists(target_dir):
         print(f"Directory {target_dir} already exists. Operation cancelled")
@@ -483,6 +555,11 @@ def main():
 
     # Copy template files and customize them
     copy_template_files(template_dir, target_dir, config)
+    
+    deb_file = os.path.join(current_dir, "odoo_17.0+e.latest_all.deb")
+    if os.path.exists(deb_file):
+        shutil.copy2(deb_file, target_dir)
+        print(f"Copied Odoo Enterprise .deb file to {target_dir}")
 
     print(f"\nClient setup for '{config['client_name']}' created successfully!")
     print(f"Directory: {target_dir}")

@@ -63,7 +63,8 @@ STEP=0
 TOTAL_STEPS=10  # Update this as needed
 
 # Constants
-INSTALL_DIR="/{client_name}-odoo-17"
+INSTALL_DIR="{path_to_install}/{client_name}-odoo-17"
+VERBOSE=false  # Set to true for more detailed output
 TEMP_LOG="/tmp/odoo_install.log"
 LOG_FILE="$INSTALL_DIR/logs/install.log"
 ODOO_ENTERPRISE_DEB="./odoo_17.0+e.latest_all.deb"
@@ -203,9 +204,84 @@ validate() {
     log INFO "$what validation successful"
 }
 
+validate_installation_path() {
+    if [ ! -d "$(dirname "$INSTALL_DIR")" ]; then
+        log ERROR "Installation path parent directory does not exist: $(dirname "$INSTALL_DIR")"
+        echo -e "${RED}${BOLD}⚠ Installation path parent directory does not exist: $(dirname "$INSTALL_DIR")${RESET}"
+        echo -e "${YELLOW}This could be because the path specified in the configuration file is incorrect.${RESET}"
+        echo -e "${YELLOW}Solution: Update 'path_to_install' in your configuration file to an existing directory.${RESET}"
+        exit 1
+    fi
+    
+    if [ ! -w "$(dirname "$INSTALL_DIR")" ]; then
+        log ERROR "No write permission to $(dirname "$INSTALL_DIR")"
+        echo -e "${RED}${BOLD}⚠ Cannot create directories in $(dirname "$INSTALL_DIR")${RESET}"
+        echo -e "${YELLOW}This could be because the path requires sudo permission.${RESET}"
+        echo -e "${YELLOW}Solution: Update 'path_to_install' in your configuration file or run with sudo.${RESET}"
+        exit 1
+    fi
+}
+
+validate_docker_volumes() {
+    local test_dir="$INSTALL_DIR/volumes/test_docker_volume"
+    mkdir -p "$test_dir"
+    
+    if [ ! -d "$test_dir" ]; then
+        log ERROR "Failed to create test directory for Docker volumes: $test_dir"
+        echo -e "${RED}${BOLD}⚠ Failed to create test directory for Docker volumes${RESET}"
+        echo -e "${YELLOW}This could be because of filesystem permissions or mount issues.${RESET}"
+        echo -e "${YELLOW}Solution: Check that the path is on a supported filesystem and has proper permissions.${RESET}"
+        exit 1
+    fi
+    
+    rmdir "$test_dir"
+}
+
+check_docker() {
+    log INFO "Checking Docker availability..."
+    
+    if ! command -v docker &>/dev/null; then
+        log ERROR "Docker is not installed"
+        echo -e "${RED}${BOLD}⚠ Docker is not installed${RESET}"
+        echo -e "${YELLOW}This installation requires Docker to run Odoo.${RESET}"
+        echo -e "${YELLOW}Solution: Install Docker using the official instructions:${RESET}"
+        echo -e "${YELLOW}https://docs.docker.com/engine/install/${RESET}"
+        exit 1
+    fi
+    
+    if ! command -v docker-compose &>/dev/null; then
+        log ERROR "Docker Compose is not installed"
+        echo -e "${RED}${BOLD}⚠ Docker Compose is not installed${RESET}"
+        echo -e "${YELLOW}This installation requires Docker Compose to orchestrate containers.${RESET}"
+        echo -e "${YELLOW}Solution: Install Docker Compose using the official instructions:${RESET}"
+        echo -e "${YELLOW}https://docs.docker.com/compose/install/${RESET}"
+        exit 1
+    fi
+    
+    if ! docker info &>/dev/null; then
+        log ERROR "Docker daemon is not running"
+        echo -e "${RED}${BOLD}⚠ Docker daemon is not running${RESET}"
+        echo -e "${YELLOW}Solution: Start Docker service with:${RESET}"
+        echo -e "${YELLOW}sudo systemctl start docker${RESET}"
+        exit 1
+    fi
+    
+    if ! docker ps &>/dev/null; then
+        log WARNING "Current user may not have permission to run Docker"
+        echo -e "${YELLOW}${BOLD}⚠ Current user may not have permission to run Docker${RESET}"
+        echo -e "${YELLOW}Solution: Add your user to the docker group:${RESET}"
+        echo -e "${YELLOW}sudo usermod -aG docker $USER${RESET}"
+        echo -e "${YELLOW}Then log out and log back in, or run this script with sudo${RESET}"
+    fi
+    
+    log INFO "Docker is available and running"
+}
+
 # Analyze system
 analyze_system() {
     show_progress "Analyzing System"
+    
+    check_docker
 
     log INFO "Gathering system information..."
 
@@ -380,6 +456,10 @@ create_directories() {
 
     log INFO "Creating directory structure..."
 
+    validate_installation_path
+    
+    validate_docker_volumes
+
     # Create all required directories with proper structure
     for dir in \
         config \
@@ -548,6 +628,15 @@ create_backup_script() {
 setup_cron() {
     log INFO "Setting up cron jobs for automated backups..."
 
+    if ! command -v crontab &>/dev/null; then
+        log WARNING "crontab command not found, skipping automated backup setup"
+        echo -e "${YELLOW}${BOLD}⚠ crontab command not found, skipping automated backup setup${RESET}"
+        echo -e "${YELLOW}To set up automated backups later, install cron and run:${RESET}"
+        echo -e "${YELLOW}  (crontab -l 2>/dev/null || true; echo \"0 3 * * * $INSTALL_DIR/backup.sh backup daily\") | crontab -${RESET}"
+        echo -e "${YELLOW}  (crontab -l 2>/dev/null || true; echo \"0 2 1 * * $INSTALL_DIR/backup.sh backup monthly\") | crontab -${RESET}"
+        return 0
+    fi
+
     # Check if cron entry already exists
     if crontab -l 2>/dev/null | grep -q "$INSTALL_DIR/backup.sh"; then
         log INFO "Cron job for backup already exists"
@@ -556,6 +645,11 @@ setup_cron() {
     fi
 
     echo -e "${CYAN}Setting up daily and monthly backup cron jobs...${RESET}"
+
+    if $VERBOSE; then
+        log INFO "Adding cron job: 0 3 * * * $INSTALL_DIR/backup.sh backup daily"
+        log INFO "Adding cron job: 0 2 1 * * $INSTALL_DIR/backup.sh backup monthly"
+    fi
 
     (crontab -l 2>/dev/null || true; echo "0 3 * * * $INSTALL_DIR/backup.sh backup daily") | crontab -
     (crontab -l 2>/dev/null || true; echo "0 2 1 * * $INSTALL_DIR/backup.sh backup monthly") | crontab -
@@ -868,9 +962,21 @@ main() {
         echo -e "${YELLOW}To set up SSL later, copy ssl-config.conf.template to ssl-config.conf, edit it, and run ./ssl-setup.sh${RESET}"
     fi
 
+    log INFO "Starting Docker containers automatically for plug-and-play experience"
+    echo -e "${CYAN}Starting Docker containers...${RESET}"
+    cd "$INSTALL_DIR" && docker-compose up -d
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Docker containers started successfully!${RESET}"
+        echo -e "${GREEN}You can access Odoo at http://localhost:{odoo_port}${RESET}"
+    else
+        echo -e "${RED}Failed to start Docker containers. Please check the logs.${RESET}"
+        echo -e "${YELLOW}You can manually start them with: cd $INSTALL_DIR && docker-compose up -d${RESET}"
+    fi
+    
     log INFO "Installation completed successfully"
     show_completion
 }
 
 # Run main function
-main  
+main                                            

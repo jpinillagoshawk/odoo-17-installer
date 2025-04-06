@@ -19,6 +19,7 @@ services:
       - USER=odoo
       - PASSWORD={client_password}
       - PROXY_MODE=True
+    command: -- --init=base -d postgres_{client_name}
     logging:
       driver: "json-file"
       options:
