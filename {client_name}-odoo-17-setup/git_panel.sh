@@ -223,6 +223,12 @@ setup_git_repository() {
         echo -e "${GREEN}Git repository setup completed successfully.${NC}"
     fi
     
+    if [ -f "$INSTALL_DIR/requirements.txt" ]; then
+        echo -e "${BLUE}Installing required packages from requirements.txt...${NC}"
+        pip3 install -r "$INSTALL_DIR/requirements.txt"
+        echo -e "${GREEN}Required packages installed successfully.${NC}"
+    fi
+    
     return 0
 }
 

@@ -66,3 +66,4 @@ xlwt==1.3.*
 zeep==4.0.0
 openupgradelib
 astor
+pycryptodome>=3.9.0
