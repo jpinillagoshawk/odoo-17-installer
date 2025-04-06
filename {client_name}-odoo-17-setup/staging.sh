@@ -174,7 +174,11 @@ create_git_branch() {
         return 1
     fi
     
+    local current_branch=$(git rev-parse --abbrev-ref HEAD)
+    
+    git fetch origin $MAIN_BRANCH
     git checkout $MAIN_BRANCH
+    git pull origin $MAIN_BRANCH
     
     local branch_name="staging-$name"
     
@@ -186,9 +190,10 @@ create_git_branch() {
         git checkout "$branch_name"
     fi
     
+    mkdir -p "$staging_dir"
     echo "$branch_name" > "$staging_dir/.git_branch"
     
-    git checkout $MAIN_BRANCH
+    git checkout "$current_branch"
     
     echo "Git branch '$branch_name' created and associated with staging environment '$name'"
     return 0
@@ -758,4 +763,4 @@ case "$1" in
     *)
         usage
         ;;
-esac          
+esac                    
