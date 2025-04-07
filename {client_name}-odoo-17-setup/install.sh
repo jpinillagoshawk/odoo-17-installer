@@ -602,22 +602,29 @@ create_backup_script() {
 
     log INFO "Creating scripts..."
 
-    # Copy the existing backup script
-    cp backup.sh "$INSTALL_DIR/backup.sh"
-    chmod +x "$INSTALL_DIR/backup.sh"
-
-    # Copy staging script
-    cp staging.sh "$INSTALL_DIR/staging.sh"
-    chmod +x "$INSTALL_DIR/staging.sh"
-
-    cp git_panel.sh "$INSTALL_DIR/git_panel.sh"
-    chmod +x "$INSTALL_DIR/git_panel.sh"
-
-    # Copy SSL setup script if it exists
-    if [ -f "ssl-setup.sh" ]; then
-        cp ssl-setup.sh "$INSTALL_DIR/ssl-setup.sh"
-        chmod +x "$INSTALL_DIR/ssl-setup.sh"
-    fi
+    # Define script paths - get current script directory
+    local CURRENT_DIR=$(pwd)
+    local script_files=("backup.sh" "staging.sh" "git_panel.sh" "ssl-setup.sh")
+    
+    for script in "${script_files[@]}"; do
+        if [ -f "$CURRENT_DIR/$script" ]; then
+            # Check if source and destination are the same file
+            if [ "$(realpath "$CURRENT_DIR/$script")" != "$(realpath "$INSTALL_DIR/$script")" ]; then
+                cp "$CURRENT_DIR/$script" "$INSTALL_DIR/$script"
+                log INFO "Copied $script to installation directory"
+            else
+                log INFO "Skipped copying $script (source and destination are the same)"
+            fi
+            
+            # Make executable regardless
+            chmod +x "$INSTALL_DIR/$script"
+        else
+            if [ "$script" != "ssl-setup.sh" ]; then  # ssl-setup.sh is optional
+                log WARNING "Script $script not found in $CURRENT_DIR"
+                echo -e "${YELLOW}${BOLD}⚠ Required script $script not found${RESET}"
+            fi
+        fi
+    done
 
     validate "scripts creation" "[ -x '$INSTALL_DIR/backup.sh' ]" "Failed to create scripts"
     log INFO "Scripts created successfully with proper permissions"
