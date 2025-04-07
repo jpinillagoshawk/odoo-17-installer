@@ -672,38 +672,39 @@ setup_ssl_config() {
 
     log INFO "Setting up SSL configuration files..."
 
-    # Copy SSL config template if it exists
-    if [ -f "ssl-config.conf.template" ]; then
-        cp ssl-config.conf.template "$INSTALL_DIR/ssl-config.conf.template"
-        log INFO "Copied SSL configuration template"
-        echo -e "${GREEN}${BOLD}✓${RESET} SSL configuration template installed"
-    else
-        log WARNING "SSL configuration template not found"
-        echo -e "${YELLOW}SSL configuration template not found. SSL setup may be incomplete.${RESET}"
-    fi
-
-    # Copy SSL README if it exists
-    if [ -f "SSL-README.md" ]; then
-        cp SSL-README.md "$INSTALL_DIR/SSL-README.md"
-        log INFO "Copied SSL README"
-    fi
-
-    # Copy direct SSL config if it exists
-    if [ -f "direct-ssl-config.conf" ]; then
-        cp direct-ssl-config.conf "$INSTALL_DIR/direct-ssl-config.conf"
-        log INFO "Copied direct SSL configuration"
-    fi
+    # Define current directory
+    local CURRENT_DIR=$(pwd)
+    local ssl_files=("ssl-config.conf.template" "SSL-README.md" "direct-ssl-config.conf" "ssl-setup.sh")
+    
+    for file in "${ssl_files[@]}"; do
+        if [ -f "$CURRENT_DIR/$file" ]; then
+            # Check if source and destination are the same file
+            if [ "$(realpath "$CURRENT_DIR/$file")" != "$(realpath "$INSTALL_DIR/$file")" ]; then
+                cp "$CURRENT_DIR/$file" "$INSTALL_DIR/$file"
+                log INFO "Copied $file to installation directory"
+            else
+                log INFO "Skipped copying $file (source and destination are the same)"
+            fi
+            
+            # Make executable if it's a script
+            if [[ "$file" == *.sh ]]; then
+                chmod +x "$INSTALL_DIR/$file"
+            fi
+        else
+            log INFO "$file not found in current directory, skipping"
+        fi
+    done
 
     # Ask if we should create and set up SSL now
-    if [ -f "ssl-config.conf.template" ] && [ -f "ssl-setup.sh" ]; then
+    if [ -f "$INSTALL_DIR/ssl-config.conf.template" ] && [ -f "$INSTALL_DIR/ssl-setup.sh" ]; then
         echo -e "${CYAN}${BOLD}SSL Configuration${RESET}"
         echo -e "${CYAN}Odoo can be configured with SSL/HTTPS for secure access.${RESET}"
 
         if confirm "Do you want to set up SSL/HTTPS during installation?"; then
-            # Copy template to actual config
-            cp ssl-config.conf.template "$INSTALL_DIR/ssl-config.conf"
+            # Copy template to actual config without using cp command, use cat instead
+            cat "$INSTALL_DIR/ssl-config.conf.template" > "$INSTALL_DIR/ssl-config.conf"
             log INFO "Created SSL configuration from template"
-
+            
             # Prompt for domain
             echo -e "${CYAN}Please enter the domain name for SSL:${RESET}"
             read -r ssl_domain
@@ -971,7 +972,7 @@ main() {
 
     log INFO "Starting Docker containers automatically for plug-and-play experience"
     echo -e "${CYAN}Starting Docker containers...${RESET}"
-    cd "$INSTALL_DIR" && docker-compose up -d
+    cd "$INSTALL_DIR" && docker compose up -d
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Docker containers started successfully!${RESET}"
