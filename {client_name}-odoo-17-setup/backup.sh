@@ -377,7 +377,7 @@ restore_backup() {
         echo "Restore verified successfully"
     else
         echo "Warning: Could not verify restore. Please check Odoo logs"
-        docker-compose logs web
+        docker compose logs web
     fi
 }
 
