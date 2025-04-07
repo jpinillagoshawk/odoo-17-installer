@@ -249,7 +249,7 @@ check_docker() {
         exit 1
     fi
     
-    if ! command -v docker-compose &>/dev/null; then
+    if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
         log ERROR "Docker Compose is not installed"
         echo -e "${RED}${BOLD}⚠ Docker Compose is not installed${RESET}"
         echo -e "${YELLOW}This installation requires Docker Compose to orchestrate containers.${RESET}"
