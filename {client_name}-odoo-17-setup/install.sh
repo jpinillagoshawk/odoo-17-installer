@@ -1073,17 +1073,9 @@ initialize_database() {
         DEBUG "Primary password authentication successful"
     fi
     
-    # Check PostgreSQL authentication configuration
-    DEBUG "Checking PostgreSQL authentication configuration"
-    PG_HBA_CONF=$(docker exec $DB_CONTAINER cat /var/lib/postgresql/data/pg_hba.conf 2>/dev/null || echo "Could not read pg_hba.conf")
-    DEBUG "PostgreSQL pg_hba.conf: $(echo "$PG_HBA_CONF" | grep -v "^#" | grep -v "^$" | head -n 10)"
-    
     # Create connection string for database operations
     PG_CONN_STRING="-h localhost -U $DB_USER -p 5432"
     DB_HOST="localhost"
-    
-    # For container-to-container communication, we need the container name or network alias
-    CONTAINER_DB_HOST="db"
     export PGPASSWORD="$pg_password"
     
     INFO "Using database connection: $PG_CONN_STRING (user=$DB_USER, db=$DB_NAME)"
@@ -1152,30 +1144,17 @@ initialize_database() {
     TEMP_CONTAINER="odoo-init-$(date +%s)"
     DEBUG "Temporary container name: $TEMP_CONTAINER"
     
-    # Test database connectivity with the exact parameters we'll use from the temp container
-    DEBUG "Testing database connectivity with exact parameters that temp container will use"
-    TEST_CONN_RESULT=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql -h $DB_CONTAINER_IP -U $DB_USER -c "SELECT 1" 2>&1 || echo "Connection failed")
-    DEBUG "DB connectivity test by IP: $TEST_CONN_RESULT"
-    
-    # Update initialization approach to use IP address directly
-    DEBUG "Using direct IP address ($DB_CONTAINER_IP) instead of hostname for database connection"
-    
-    # Create an environment file for secure password passing
-    ENV_FILE="/tmp/odoo_init_env_$$"
-    echo "PGPASSWORD=$pg_password" > $ENV_FILE
-    chmod 600 $ENV_FILE
-    DEBUG "Created temporary environment file for secure password handling"
-    
     # Run temporary container with proper mounts and network
     DEBUG "Running temporary container"
-    DEBUG "Command: docker run --rm --name $TEMP_CONTAINER --network $DOCKER_NETWORK --env-file $ENV_FILE -v $CURRENT_DIR/enterprise:/mnt/enterprise -v $CURRENT_DIR/addons:/mnt/extra-addons"
+    DEBUG "Command: docker run --rm --name $TEMP_CONTAINER --network $DOCKER_NETWORK -e PASSWORD=$pg_password -v $CURRENT_DIR/enterprise:/mnt/enterprise -v $CURRENT_DIR/addons:/mnt/extra-addons"
 
     if [ "$VERBOSE" = true ]; then
         # When in verbose mode, capture all output
         docker run --rm \
             --name $TEMP_CONTAINER \
             --network $DOCKER_NETWORK \
-            --env-file $ENV_FILE \
+            -e PASSWORD="$pg_password" \
+            -e PGPASSWORD="$pg_password" \
             -v "$CURRENT_DIR/enterprise:/mnt/enterprise" \
             -v "$CURRENT_DIR/addons:/mnt/extra-addons" \
             -e LOG_LEVEL=debug \
@@ -1185,7 +1164,7 @@ initialize_database() {
                 --without-demo=all \
                 --load-language=en_US \
                 -d $DB_NAME \
-                --db_host=$DB_CONTAINER_IP \
+                --db_host=db \
                 --db_user=$DB_USER \
                 --db_password="$pg_password" 2>&1 | tee -a "$LOG_FILE"
     else
@@ -1193,7 +1172,8 @@ initialize_database() {
         docker run --rm \
             --name $TEMP_CONTAINER \
             --network $DOCKER_NETWORK \
-            --env-file $ENV_FILE \
+            -e PASSWORD="$pg_password" \
+            -e PGPASSWORD="$pg_password" \
             -v "$CURRENT_DIR/enterprise:/mnt/enterprise" \
             -v "$CURRENT_DIR/addons:/mnt/extra-addons" \
             -e LOG_LEVEL=info \
@@ -1203,14 +1183,10 @@ initialize_database() {
                 --without-demo=all \
                 --load-language=en_US \
                 -d $DB_NAME \
-                --db_host=$DB_CONTAINER_IP \
+                --db_host=db \
                 --db_user=$DB_USER \
                 --db_password="$pg_password"
     fi
-    
-    # Remove temporary environment file
-    rm -f $ENV_FILE
-    DEBUG "Removed temporary environment file"
     
     INIT_RESULT=$?
     DEBUG "Temporary container initialization exit code: $INIT_RESULT"
@@ -1240,300 +1216,27 @@ initialize_database() {
         return 0
     fi
     
-    # If the container returned success but no tables were created, try to debug why
-    if [ "$INIT_RESULT" -eq 0 ] && [ "$table_count" -lt 20 ]; then
-        DEBUG "Container exited successfully but database lacks tables. This could indicate:"
-        DEBUG "1. Odoo connected but failed to create tables"
-        DEBUG "2. No error was reported by the container but initialization failed"
-        
-        # Check for errors in the Odoo logs
-        DEBUG "Checking if temp container logged errors during initialization"
-        docker logs $TEMP_CONTAINER 2>&1 || true
-    fi
+    # If the main approach failed, provide diagnostic information and exit
+    ERROR "Database initialization failed. Tables created: $table_count (expected >20)"
+    echo -e "${RED}${BOLD}⚠ Database initialization failed${RESET}"
+    DEBUG "Temporary container approach failed. Tables created: $table_count (expected >20)"
     
-    # If the main approach failed, try a fallback using direct DB access
-    WARNING "Temporary container initialization failed or incomplete ($table_count tables). Trying direct initialization..."
-    echo -e "${YELLOW}Temporary container initialization failed or incomplete. Trying direct initialization...${RESET}"
+    # Provide detailed diagnostics
+    DEBUG "=== DIAGNOSTIC INFORMATION ==="
+    DEBUG "Docker container status:"
+    docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "$CONTAINER_NAME|$DB_CONTAINER" >> "$LOG_FILE"
     
-    # Step 8: Direct initialization - Create a minimal set of tables directly
-    INFO "Attempting direct database initialization - Fallback method"
-    echo -e "${CYAN}Attempting direct database initialization...${RESET}"
+    DEBUG "PostgreSQL container logs (last 30 lines):"
+    docker logs --tail 30 $DB_CONTAINER >> "$LOG_FILE" 2>&1
     
-    # First, drop the database again for a clean start
-    DEBUG "Dropping database again for clean start"
-    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-    DEBUG "DROP DATABASE result: $docker_output"
-    sleep 2
+    DEBUG "Odoo container logs (last 30 lines):"
+    docker logs --tail 30 $CONTAINER_NAME >> "$LOG_FILE" 2>&1
     
-    # Create empty database
-    DEBUG "Creating fresh database"
-    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
-    DEBUG "CREATE DATABASE result: $docker_output"
-    sleep 2
+    DEBUG "Network information:"
+    docker network inspect $DOCKER_NETWORK >> "$LOG_FILE" 2>&1
     
-    # Try initdb.sql approach - using basic schemas that Odoo needs
-    DEBUG "Creating initialization SQL script"
-    INIT_SQL="/tmp/odoo_init_$$.sql"
-    cat > $INIT_SQL << EOF
--- Create basic tables needed by Odoo
-CREATE TABLE ir_module_module (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(128) NOT NULL,
-    state VARCHAR(16) NOT NULL DEFAULT 'uninstalled'
-);
-
--- Insert base module as installed
-INSERT INTO ir_module_module (name, state) VALUES ('base', 'installed');
-INSERT INTO ir_module_module (name, state) VALUES ('web', 'installed');
-
--- Create version table
-CREATE TABLE ir_module_module_dependency (
-    id SERIAL PRIMARY KEY,
-    module_id INTEGER NOT NULL,
-    name VARCHAR(128) NOT NULL,
-    FOREIGN KEY (module_id) REFERENCES ir_module_module(id) ON DELETE CASCADE
-);
-
--- Create user table
-CREATE TABLE res_users (
-    id SERIAL PRIMARY KEY,
-    login VARCHAR(64) NOT NULL,
-    password VARCHAR(64) DEFAULT NULL,
-    active BOOLEAN DEFAULT true
-);
-
--- Insert admin user
-INSERT INTO res_users (id, login, password) VALUES (1, 'admin', '$pg_password');
-EOF
-    
-    DEBUG "Executing initialization SQL script"
-    docker cp $INIT_SQL $DB_CONTAINER:/tmp/init.sql
-    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -f /tmp/init.sql 2>&1)
-    DEBUG "SQL initialization result: $docker_output"
-    
-    # Remove temporary SQL file
-    rm -f $INIT_SQL
-    docker exec $DB_CONTAINER rm -f /tmp/init.sql
-    
-    # Check if we have tables
-    table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
-    DEBUG "Table count after direct SQL initialization: $table_count"
-    
-    if [ -n "$table_count" ] && [ "$table_count" -gt 3 ]; then
-        INFO "Database minimally initialized with SQL script - $table_count tables created"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database minimally initialized with $table_count tables"
-        
-        # Now let the main Odoo container upgrade the database
-        INFO "Letting main Odoo container complete the database setup"
-        echo -e "${CYAN}Letting Odoo complete the database setup...${RESET}"
-        
-        # Start the main container
-        docker compose up -d web
-        sleep 15
-        
-        # Allow some time for Odoo to upgrade the database
-        echo -e "${YELLOW}Waiting for Odoo to complete database setup (45s)...${RESET}"
-        sleep 45
-        
-        # Check if we now have more tables
-        table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
-        DEBUG "Table count after Odoo upgrade: $table_count"
-        
-        if [ -n "$table_count" ] && [ "$table_count" -gt 20 ]; then
-            INFO "Database fully initialized by main Odoo container - $table_count tables created"
-            echo -e "${GREEN}${BOLD}✓${RESET} Database fully initialized with $table_count tables"
-            return 0
-        fi
-    fi
-    
-    # If we're still here, try the API method as last resort
-    WARNING "Direct initialization incomplete. Trying API method..."
-    echo -e "${YELLOW}Direct initialization incomplete. Trying API method...${RESET}"
-    
-    # Step 9: Fallback - Use the Odoo API for database creation
-    INFO "Using Odoo API to create database - Last resort method"
-    echo -e "${CYAN}Using Odoo API to create database...${RESET}"
-    
-    # First, drop the database again for a clean start
-    DEBUG "Dropping database again for clean start"
-    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-    DEBUG "DROP DATABASE result: $docker_output"
-    sleep 2
-    
-    # Ensure web container is running
-    DEBUG "Ensuring Odoo web container is running for API access"
-    docker compose up -d web
-    sleep 15
-    
-    # Get IP address of web container for API requests
-    WEB_CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_NAME)
-    DEBUG "Web container IP: $WEB_CONTAINER_IP"
-    
-    # Try various methods to access the API
-    DEBUG "Testing API accessibility before sending request"
-    CURL_RESPONSE=$(curl -s http://localhost:8069/web/database/manager 2>&1)
-    DEBUG "API accessibility test: ${#CURL_RESPONSE} bytes received"
-    
-    # Prepare API request
-    api_request='{
-        "jsonrpc": "2.0",
-        "method": "call",
-        "params": {
-            "master_pwd": "'$pg_password'",
-            "name": "'$DB_NAME'",
-            "login": "admin",
-            "password": "'$pg_password'",
-            "lang": "en_US",
-            "country_code": "es",
-            "phone": ""
-        }
-    }'
-    DEBUG "Sending API request to create database"
-    
-    if [ "$VERBOSE" = true ]; then
-        DEBUG "Full API request (redacted passwords):"
-        echo "$api_request" | sed 's/"master_pwd": "[^"]*"/"master_pwd": "REDACTED"/g' | sed 's/"password": "[^"]*"/"password": "REDACTED"/g' >> "$LOG_FILE"
-        
-        # Try multiple access points for the API to increase chance of success
-        DEBUG "Trying API request via localhost:8069"
-        api_response=$(curl -v -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "$api_request" \
-            http://localhost:8069/web/database/create)
-        DEBUG "API response (localhost): $api_response"
-        
-        if echo "$api_response" | grep -q "error"; then
-            DEBUG "Localhost API failed, trying container IP"
-            api_response=$(curl -v -s -X POST \
-                -H "Content-Type: application/json" \
-                -d "$api_request" \
-                http://$WEB_CONTAINER_IP:8069/web/database/create)
-            DEBUG "API response (container IP): $api_response"
-        fi
-    else
-        # Normal mode - try both approaches with verbose curl for error info
-        curl -v -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "$api_request" \
-            http://localhost:8069/web/database/create > /dev/null
-            
-        # If that didn't work, try container IP directly
-        curl -v -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "$api_request" \
-            http://$WEB_CONTAINER_IP:8069/web/database/create > /dev/null
-    fi
-    
-    echo -e "${YELLOW}Waiting for database creation to complete...${RESET}"
-    DEBUG "Waiting for database creation to complete (45s)"
-    sleep 45
-    
-    # Check if initialization worked by counting tables again
-    DEBUG "Verifying database tables after API method"
-    table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
-    DEBUG "Table count after API method: $table_count"
-    
-    # List some tables if in verbose mode
-    if [ "$VERBOSE" = true ] && [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
-        DEBUG "Listing first 10 tables in database:"
-        table_list=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' LIMIT 10;" -t 2>/dev/null)
-        DEBUG "Tables: $table_list"
-        
-        # Check specifically for ir_module_module table
-        ir_module_check=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module');" -t 2>/dev/null | tr -d '[:space:]')
-        DEBUG "ir_module_module table exists: $ir_module_check"
-        
-        if [ "$ir_module_check" = "t" ]; then
-            # Count installed modules
-            modules_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state='installed';" -t 2>/dev/null | tr -d '[:space:]')
-            DEBUG "Number of installed modules: $modules_count"
-        fi
-    fi
-    
-    if [ -n "$table_count" ] && [ "$table_count" -gt 20 ]; then
-        INFO "Database initialized successfully - API Method - $table_count tables created"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully with $table_count tables"
-        DEBUG "API method successful - initialization complete"
-        return 0
-    fi
-    
-    # Final fallback - try running Odoo directly in the main container with different parameters
-    WARNING "API initialization failed. Trying direct initialization in main container..."
-    echo -e "${YELLOW}API initialization failed. Trying direct initialization in main container...${RESET}"
-    
-    # Step 10: Last attempt - Direct initialization in main container with different parameters
-    INFO "Trying direct initialization in main container - Last attempt"
-    DEBUG "Using different port and parameters for last attempt"
-    
-    # Try with a different command and port
-    DEBUG "Executing odoo command with custom port to avoid conflicts"
-    docker exec -e PGPASSWORD="$pg_password" \
-        -e LOG_LEVEL=debug \
-        $CONTAINER_NAME \
-        odoo --stop-after-init \
-            --init=base,web \
-            --without-demo=all \
-            --load-language=en_US \
-            -d $DB_NAME \
-            --db_host=$DB_CONTAINER_IP \
-            --db_user=$DB_USER \
-            --db_password="$pg_password" \
-            --http-port=8070
-    
-    INIT_RESULT=$?
-    DEBUG "Final initialization attempt exit code: $INIT_RESULT"
-    
-    # Final verification
-    DEBUG "Final database tables verification"
-    table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
-    DEBUG "Final table count: $table_count"
-    
-    if [ -n "$table_count" ] && [ "$table_count" -gt 20 ]; then
-        INFO "Database initialized successfully - Last attempt - $table_count tables created"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully with $table_count tables"
-        DEBUG "Final attempt successful - initialization complete"
-        return 0
-    fi
-    
-    ERROR "Database initialization failed after multiple attempts ($table_count tables)"
-    echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
-    DEBUG "All methods failed. Database not properly initialized."
-    DEBUG "Final table count: $table_count (expected >20)"
-    
-    # Provide detailed diagnostics if in verbose mode
-    if [ "$VERBOSE" = true ]; then
-        DEBUG "=== DIAGNOSTIC INFORMATION ==="
-        DEBUG "Docker container status:"
-        docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "$CONTAINER_NAME|$DB_CONTAINER" >> "$LOG_FILE"
-        
-        DEBUG "PostgreSQL container logs (last 30 lines):"
-        docker logs --tail 30 $DB_CONTAINER >> "$LOG_FILE" 2>&1
-        
-        DEBUG "Odoo container logs (last 30 lines):"
-        docker logs --tail 30 $CONTAINER_NAME >> "$LOG_FILE" 2>&1
-        
-        DEBUG "Database list:"
-        docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "\l" >> "$LOG_FILE" 2>&1
-        
-        DEBUG "Odoo configuration:"
-        docker exec $CONTAINER_NAME cat /etc/odoo/odoo.conf >> "$LOG_FILE" 2>&1 || true
-        
-        DEBUG "Network information:"
-        docker network inspect $DOCKER_NETWORK >> "$LOG_FILE" 2>&1
-        
-        # Check PostgreSQL authentication
-        DEBUG "PostgreSQL authentication settings:"
-        docker exec $DB_CONTAINER cat /var/lib/postgresql/data/pg_hba.conf | grep -v "^#" | grep -v "^$" >> "$LOG_FILE" 2>&1 || true
-        
-        DEBUG "=== END DIAGNOSTIC INFORMATION ==="
-    fi
-    
-    echo -e "${YELLOW}Manual intervention required. Please follow these steps:${RESET}"
-    echo -e "${YELLOW}1. Visit http://$(hostname -I | awk '{print $1}'):8069/web/database/manager${RESET}"
-    echo -e "${YELLOW}2. Choose 'Create Database'${RESET}"
-    echo -e "${YELLOW}3. Set Master Password to: $pg_password${RESET}"
-    echo -e "${YELLOW}4. Set Database Name to: $DB_NAME${RESET}"
-    echo -e "${YELLOW}5. Complete the form and create the database${RESET}"
+    echo -e "${RED}Database initialization failed. Please check the log file for details.${RESET}"
+    echo -e "${YELLOW}Log file: $LOG_FILE${RESET}"
     
     return 1
 }
