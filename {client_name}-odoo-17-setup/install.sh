@@ -1088,10 +1088,6 @@ initialize_database() {
         fi
     fi
     
-    # Stop the main Odoo container to prevent port conflicts
-    INFO "Temporarily stopping main Odoo container to prevent port conflicts..."
-    docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    
     # Get the Docker network used by the PostgreSQL container
     DOCKER_NETWORK=$(docker inspect "$DB_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{end}}')
     DEBUG "Using Docker network: $DOCKER_NETWORK"
@@ -1111,19 +1107,12 @@ initialize_database() {
     
     # Ensure the odoo user's password matches the POSTGRES_PASSWORD
     echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
-    if [ "$DB_ADMIN_USER" = "postgres" ]; then
-        SYNC_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+    if ! docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';" 2>/dev/null | grep -q "1 row"; then
+        echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
+        docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>/dev/null
     else
-        # Check first if odoo user can execute the ALTER USER command
-        PRIV_CHECK=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT usesuper FROM pg_user WHERE usename='$DB_USER'" -t 2>/dev/null | tr -d '[:space:]')
-        if [ "$PRIV_CHECK" = "t" ]; then
-            SYNC_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
-        else
-            WARNING "Cannot update user password - $DB_USER doesn't have superuser privileges"
-            echo -e "${YELLOW}Cannot update the database user password. Trying alternative connection method...${RESET}"
-            # Use a direct connection string instead of separate parameters
-            export PGPASSWORD="$DB_WORKING_PASSWORD"
-        fi
+        echo -e "${YELLOW}Setting password for existing user $DB_USER...${RESET}"
+        docker exec -u postgres "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>/dev/null
     fi
     echo -e "${GREEN}Database user password synchronized${RESET}"
     
@@ -1134,568 +1123,124 @@ initialize_database() {
     INFO "Checking if PostgreSQL is responsive..."
     if ! docker exec "$DB_CONTAINER" pg_isready -q; then
         ERROR "PostgreSQL is not responsive in container $DB_CONTAINER"
-        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
         return 1
-    fi
-    
-    # Verify the postgres user exists and has required permissions
-    INFO "Verifying database user access..."
-    if ! docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1;" >/dev/null 2>&1; then
-        WARNING "Cannot connect directly as 'postgres' user. This is uncommon but not fatal."
-        echo -e "${YELLOW}Could not connect as PostgreSQL 'postgres' user. Checking available users...${RESET}"
-        
-        # List PostgreSQL users for diagnostic purposes - try different approaches
-        USERS_OUTPUT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT usename,usesuper FROM pg_user;" 2>/dev/null || echo "Failed to list users")
-        echo -e "${YELLOW}Available PostgreSQL users:${RESET}"
-        echo "$USERS_OUTPUT"
-        
-        # Try with the odoo user as the database superuser
-        echo -e "${YELLOW}Will continue with '$DB_USER' as the database administrator...${RESET}"
-        DB_ADMIN_USER="$DB_USER"
-    else
-        INFO "Successfully connected as PostgreSQL 'postgres' user"
-        DB_ADMIN_USER="postgres"
     fi
     
     # Terminate existing connections to allow dropping the database
     INFO "Terminating existing connections to database..."
-    if [ "$DB_ADMIN_USER" = "postgres" ]; then
-        docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
-    else
-        docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
-    fi
+    docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
     
     # Drop existing database if it exists
     INFO "Dropping existing database if it exists..."
-    if [ "$DB_ADMIN_USER" = "postgres" ]; then
-        DROP_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-    else
-        DROP_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-    fi
-    
-    if ! echo "$DROP_RESULT" | grep -q "DROP DATABASE"; then
-        WARNING "Could not drop existing database, it may not exist or might be in use."
-        echo -e "${YELLOW}Drop database result: $DROP_RESULT${RESET}"
-        echo -e "${YELLOW}Failed to drop database. Trying with force disconnect of all connections...${RESET}"
-        
-        # Force disconnect all connections more aggressively
-        if [ "$DB_ADMIN_USER" = "postgres" ]; then
-            docker exec -u postgres "$DB_CONTAINER" psql -c "
-                UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
-                SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
-            " 2>&1 || true
-            
-            # Try dropping again
-            DROP_RESULT2=$(docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-        else
-            docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "
-                UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
-                SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
-            " 2>&1 || true
-            
-            # Try dropping again
-            DROP_RESULT2=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-        fi
-        
-        if ! echo "$DROP_RESULT2" | grep -q "DROP DATABASE"; then
-            WARNING "Still could not drop database after aggressive termination. Will try to continue."
-        else
-            INFO "Successfully dropped database after aggressive connection termination."
-        fi
-    fi
+    docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1
     
     # Create fresh database
     INFO "Creating new database $DB_NAME with owner $DB_USER..."
-    if [ "$DB_ADMIN_USER" = "postgres" ]; then
-        CREATE_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
-    else
-        CREATE_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "CREATE DATABASE $DB_NAME;" 2>&1)
+    docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1
+    
+    # Backup the original docker-compose.yml
+    cd "$INSTALL_DIR"
+    cp docker-compose.yml docker-compose.yml.bak
+    
+    # Temporarily modify docker-compose.yml to add initialization parameters
+    INFO "Temporarily modifying docker-compose.yml to include initialization parameters..."
+    echo -e "${YELLOW}Configuring Odoo service for database initialization...${RESET}"
+    
+    # Extract current command if it exists
+    CURRENT_CMD=$(grep -A1 "command:" docker-compose.yml | grep -v "command:" | sed 's/^[ \t]*//' || echo "")
+    
+    # Remove any existing command line
+    if grep -q "command:" docker-compose.yml; then
+        # Create a temporary file without the command line
+        grep -v "command:" docker-compose.yml > docker-compose.yml.tmp
+        mv docker-compose.yml.tmp docker-compose.yml
     fi
     
-    if ! echo "$CREATE_RESULT" | grep -q "CREATE DATABASE"; then
-        ERROR "Failed to create new database $DB_NAME. Result: $CREATE_RESULT"
-        echo -e "${RED}Failed to create database. Checking if database already exists...${RESET}"
-        
-        # Check if database already exists
-        if [ "$DB_ADMIN_USER" = "postgres" ]; then
-            EXISTS_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1)
-        else
-            EXISTS_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1)
-        fi
-        
-        if echo "$EXISTS_RESULT" | grep -q "1 row"; then
-            WARNING "Database $DB_NAME already exists. Will try to continue with existing database."
-        else
-            ERROR "Cannot create database and it doesn't exist. Cannot continue."
-            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-            return 1
-        fi
+    # Find the web service section and add our initialization command
+    sed -i "/web:/,/restart:/ s/restart: unless-stopped/restart: unless-stopped\n    command: odoo --stop-after-init --init=base,web --without-demo=all --load-language=en_US -d $DB_NAME --db_host=db --db_port=5432 --db_user=$DB_USER --db_password=$DB_WORKING_PASSWORD/" docker-compose.yml
+    
+    # Stop any running Odoo container
+    if docker ps | grep -q "$CONTAINER_NAME"; then
+        INFO "Stopping running Odoo container before initialization..."
+        docker stop "$CONTAINER_NAME" >/dev/null 2>&1
     fi
     
-    # Get the Odoo image from docker-compose.yml
-    ODOO_IMAGE=$(grep -A 5 "^  web:" docker-compose.yml | grep "image:" | sed 's/.*image: *//g')
-    if [ -z "$ODOO_IMAGE" ]; then
-        # Try alternative docker-compose format
-        ODOO_IMAGE=$(grep -A 5 "web:" docker-compose.yml | grep "image:" | sed 's/.*image: *//g')
-        if [ -z "$ODOO_IMAGE" ]; then
-            ERROR "Could not determine Odoo image from docker-compose.yml"
-            echo -e "${RED}Failed to extract Odoo image name from docker-compose.yml${RESET}"
-            echo -e "${YELLOW}Checking container image directly...${RESET}"
+    # Start containers with initialization parameters
+    INFO "Starting Odoo container with initialization parameters..."
+    echo -e "${CYAN}Running Odoo with initialization parameters...${RESET}"
+    docker compose up -d
+    
+    # Wait for initialization to complete (container will stop after initialization)
+    INFO "Waiting for initialization to complete..."
+    echo -e "${YELLOW}Waiting for initialization to complete (this may take several minutes)...${RESET}"
+    
+    # Set timeout for initialization (5 minutes should be enough)
+    TIMEOUT=300
+    start_time=$(date +%s)
+    
+    # Show spinner while waiting
+    echo -n "Initializing database "
+    while docker ps | grep -q "$CONTAINER_NAME"; do
+        for s in / - \\ \|; do
+            echo -ne "\rInitializing database $s"
+            sleep 0.5
             
-            # Try to get image from existing container
-            if docker ps -a | grep -q "$CONTAINER_NAME"; then
-                ODOO_IMAGE=$(docker inspect --format='{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null)
-                if [ -n "$ODOO_IMAGE" ]; then
-                    INFO "Retrieved Odoo image from container: $ODOO_IMAGE"
-                else
-                    ERROR "Could not determine Odoo image. Please check your docker-compose.yml"
-                    docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-                    return 1
-                fi
-            else
-                ERROR "Could not determine Odoo image and container doesn't exist. Please check your docker-compose.yml"
-                docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-                return 1
+            # Check if timeout reached
+            current_time=$(date +%s)
+            elapsed=$((current_time - start_time))
+            if [ $elapsed -gt $TIMEOUT ]; then
+                echo -e "\n${RED}Initialization timed out after $TIMEOUT seconds.${RESET}"
+                break 2
             fi
-        fi
-    fi
-    DEBUG "Using Odoo image: $ODOO_IMAGE"
-    
-    # Initialize database with temporary container
-    INFO "Initializing Odoo database using temporary container..."
-    echo -e "${CYAN}Initializing database with temporary container...${RESET}"
-    
-    # Generate a unique name for the temporary container using a more reliable method
-    TEMP_CONTAINER="odoo-init-$(date +%Y%m%d%H%M%S)"
-    
-    # Make sure no container with the same name exists (cleanup any possible leftovers)
-    echo -e "${YELLOW}Cleaning up any existing temporary containers...${RESET}"
-    docker rm -f "$TEMP_CONTAINER" >/dev/null 2>&1 || true
-    
-    # Also check for any other odoo-init containers and clean them up
-    for container in $(docker ps -a --format "{{.Names}}" | grep "odoo-init-" 2>/dev/null || true); do
-        echo -e "${YELLOW}Removing old initialization container: $container${RESET}"
-        docker rm -f "$container" >/dev/null 2>&1 || true
+        done
     done
+    echo -e "\r${GREEN}Initialization process completed!${RESET}"
     
-    # Display the command we're going to run
-    echo -e "${YELLOW}Running temporary container with command:${RESET}"
-    echo -e "docker run --rm --name $TEMP_CONTAINER --network=$DOCKER_NETWORK [with mounted volumes]"
-    echo -e "odoo --stop-after-init --init=base,web ... -d $DB_NAME --db_host=db --db_user=$DB_USER"
+    # Check if initialization was successful by looking at the container exit code
+    INIT_STATUS=$(docker inspect --format='{{.State.ExitCode}}' "$CONTAINER_NAME")
     
-    # Run the container with detailed logging and better error handling
-    echo -e "${YELLOW}Testing network connectivity to database container...${RESET}"
-    if ! docker network inspect "$DOCKER_NETWORK" | grep -q "\"$DB_CONTAINER\""; then
-        ERROR "Database container $DB_CONTAINER not found on network $DOCKER_NETWORK"
-        echo -e "${RED}Network connectivity issue: Database container not found on network.${RESET}"
-        echo -e "${YELLOW}Available containers on network $DOCKER_NETWORK:${RESET}"
-        docker network inspect "$DOCKER_NETWORK" | grep -A 10 "\"Containers\"" || true
-        
-        echo -e "${YELLOW}Attempting to ping database container by name...${RESET}"
-        docker run --rm --network="$DOCKER_NETWORK" alpine ping -c 2 db || {
-            echo -e "${RED}Cannot ping 'db' in the Docker network. This suggests a network configuration issue.${RESET}"
-            echo -e "${YELLOW}Will try to restart the database container and retry...${RESET}"
-            docker restart "$DB_CONTAINER" || true
-            sleep 5
-        }
-    fi
+    # Restore original docker-compose.yml
+    INFO "Restoring original docker-compose.yml..."
+    echo -e "${YELLOW}Restoring original configuration...${RESET}"
+    mv docker-compose.yml.bak docker-compose.yml
     
-    # Make sure enterprise and addons directories exist
-    mkdir -p "$PWD/enterprise" "$PWD/addons"
-    
-    chmod -R 755 "$PWD/enterprise" "$PWD/addons" 2>/dev/null || true
-    
-    # Print volume information
-    echo -e "${YELLOW}Volume paths:${RESET}"
-    echo -e "Enterprise dir: $PWD/enterprise ($(ls -la "$PWD/enterprise" | wc -l) items)"
-    echo -e "Addons dir: $PWD/addons ($(ls -la "$PWD/addons" | wc -l) items)"
-    
-    # Verify database connection before proceeding
-    echo -e "${YELLOW}Verifying database connection credentials...${RESET}"
-    CONNECTION_OK=false
-    
-    # Get the database container's IP address for direct connection
-    DB_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DB_CONTAINER")
-    echo -e "${YELLOW}Database container IP: $DB_IP${RESET}"
-    
-    echo -e "${YELLOW}Testing connection using container name (db)...${RESET}"
-    if docker exec -e "PGPASSWORD=$DB_WORKING_PASSWORD" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-        echo -e "${GREEN}Database connection successful with provided credentials (localhost)${RESET}"
-        CONNECTION_OK=true
-    else
-        echo -e "${RED}Database connection failed with standard credentials and localhost${RESET}"
-        
-        # Try direct connection to localhost
-        echo -e "${YELLOW}Testing connection with direct localhost...${RESET}"
-        if docker exec -e "PGPASSWORD=$DB_WORKING_PASSWORD" "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-            echo -e "${GREEN}Connection successful with direct localhost${RESET}"
-            CONNECTION_OK=true
-        else
-            # Try with different password variations
-            echo -e "${YELLOW}Trying with alternative approaches...${RESET}"
-            
-            # 1. Try with POSTGRES_PASSWORD directly
-            POSTGRES_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
-            if [ -n "$POSTGRES_PASSWORD" ] && [ "$POSTGRES_PASSWORD" != "$DB_WORKING_PASSWORD" ]; then
-                echo -e "${YELLOW}POSTGRES_PASSWORD differs from DB_WORKING_PASSWORD, trying with POSTGRES_PASSWORD...${RESET}"
-                if docker exec -e "PGPASSWORD=$POSTGRES_PASSWORD" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-                    echo -e "${GREEN}Connection successful with POSTGRES_PASSWORD${RESET}"
-                    CONNECTION_OK=true
-                    DB_WORKING_PASSWORD="$POSTGRES_PASSWORD"
-                fi
-            fi
-            
-            # 2. Check if odoo user password is set as expected
-            echo -e "${YELLOW}Checking if odoo user exists and has proper permissions...${RESET}"
-            ODOO_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -t -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | tr -d '[:space:]' || echo "0")
-            if [ "$ODOO_EXISTS" = "1" ]; then
-                echo -e "${GREEN}Odoo user exists in PostgreSQL${RESET}"
-                
-                # Explicitly reset odoo password to DB_PASS
-                echo -e "${YELLOW}Resetting odoo user password explicitly...${RESET}"
-                docker exec "$DB_CONTAINER" psql -U postgres -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null
-                
-                # Verify if password reset worked
-                if docker exec -e "PGPASSWORD=$DB_PASS" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-                    echo -e "${GREEN}Password reset successful, using DB_PASS${RESET}"
-                    CONNECTION_OK=true
-                    DB_WORKING_PASSWORD="$DB_PASS"
-                fi
-            else
-                echo -e "${RED}Odoo user does not exist in PostgreSQL roles${RESET}"
-                
-                # Create odoo user with proper password
-                echo -e "${YELLOW}Creating odoo user with proper password...${RESET}"
-                docker exec "$DB_CONTAINER" psql -U postgres -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_PASS';" 2>/dev/null
-                
-                # Verify if user creation worked
-                if docker exec -e "PGPASSWORD=$DB_PASS" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-                    echo -e "${GREEN}User creation successful, using DB_PASS${RESET}"
-                    CONNECTION_OK=true
-                    DB_WORKING_PASSWORD="$DB_PASS"
-                fi
-            fi
-            
-            # 3. Try enabling trust authentication as a last resort
-            if [ "$CONNECTION_OK" = false ]; then
-                echo -e "${YELLOW}Enabling trust authentication as a last resort...${RESET}"
-                docker exec "$DB_CONTAINER" bash -c "echo 'host all all all trust' > /var/lib/postgresql/data/pg_hba.conf"
-                docker exec "$DB_CONTAINER" bash -c "cat /var/lib/postgresql/data/pg_hba.conf"
-                docker exec "$DB_CONTAINER" bash -c "if command -v pg_ctl >/dev/null; then su postgres -c 'pg_ctl reload'; else pkill -HUP postgres; fi"
-                
-                # Wait for changes to take effect
-                echo -e "${YELLOW}Waiting for PostgreSQL to reload configuration...${RESET}"
-                sleep 5
-                
-                # Test with trust auth
-                if docker exec "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-                    echo -e "${GREEN}Trust authentication enabled successfully${RESET}"
-                    CONNECTION_OK=true
-                    # Empty password for trust authentication
-                    DB_WORKING_PASSWORD=""
-                else
-                    echo -e "${RED}Trust authentication failed${RESET}"
-                    
-                    # As a last resort, attempt to use postgres user directly
-                    echo -e "${YELLOW}Attempting to use postgres user directly...${RESET}"
-                    if docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1" >/dev/null 2>&1; then
-                        echo -e "${GREEN}Connection with postgres user successful${RESET}"
-                        echo -e "${YELLOW}Configuring database to allow the postgres user...${RESET}"
-                        DB_USER="postgres"
-                        DB_WORKING_PASSWORD=""
-                        CONNECTION_OK=true
-                    fi
-                fi
-            fi
-        fi
-    fi
-    
-    # Final diagnostics if still not connected
-    if [ "$CONNECTION_OK" = false ]; then
-        echo -e "${RED}All connection attempts failed. Detailed diagnostics:${RESET}"
-        echo -e "${YELLOW}Container environment:${RESET}"
-        docker exec "$DB_CONTAINER" env | grep -i "postgres\|pg\|odoo"
-        
-        echo -e "${YELLOW}PostgreSQL authentication file (pg_hba.conf):${RESET}"
-        docker exec "$DB_CONTAINER" cat /var/lib/postgresql/data/pg_hba.conf 2>/dev/null
-        
-        echo -e "${YELLOW}PostgreSQL logs:${RESET}"
-        docker logs --tail 20 "$DB_CONTAINER"
-        
-        echo -e "${RED}WARNING: Proceeding with initialization, but it will likely fail${RESET}"
-    else
-        echo -e "${GREEN}Successfully established database connection!${RESET}"
-        echo -e "${GREEN}Using username: $DB_USER with working password${RESET}"
-    fi
-    
-    echo -e "${YELLOW}Running temporary Odoo container to initialize database...${RESET}"
-    
-    # Temporarily disable exit on error to prevent script termination
-    set +e
-    
-    echo -e "${YELLOW}Running direct container command (this may take a few minutes)...${RESET}"
-    
-    # Run the container directly with output to console 
-    echo -e "${GREEN}Starting initialization process...${RESET}"
-    
-    # Debug - print exact command to be executed
-    DEBUG_CMD="docker run --rm \\
-        --name \"$TEMP_CONTAINER\" \\
-        --network=\"$DOCKER_NETWORK\" \\
-        -v \"$PWD/enterprise:/mnt/enterprise:z\" \\
-        -v \"$PWD/addons:/mnt/extra-addons:z\" \\
-        -e \"DB_HOST=db\" \\
-        -e \"DB_PORT=5432\" \\
-        -e \"DB_USER=$DB_USER\" \\
-        -e \"DB_PASSWORD=$DB_WORKING_PASSWORD\" \\
-        -e \"LANG=C.UTF-8\" \\
-        -e \"TZ=UTC\" \\
-        \"$ODOO_IMAGE\" \\
-        -- \\
-        --stop-after-init \\
-        --init=base,web \\
-        --load-language=en_US \\
-        --without-demo=all \\
-        --log-level=info \\
-        -d \"$DB_NAME\" \\
-        --db_host=db \\
-        --db_port=5432 \\
-        --db_user=\"$DB_USER\" \\
-        --db_password=\"$DB_WORKING_PASSWORD\""
-    
-    echo -e "${YELLOW}Debug - Full command:${RESET}\n$DEBUG_CMD"
-    
-    # Adjust database connection parameters based on previous test
-    if [ "$CONNECTION_OK" = true ]; then
-        echo -e "${GREEN}Using working database credentials for initialization${RESET}"
-    else
-        echo -e "${YELLOW}Database connection test failed earlier - trying with 'trust' authentication method...${RESET}"
-        # Try to temporarily modify pg_hba.conf to allow trust authentication
-        echo -e "${YELLOW}Attempting to temporarily enable trust authentication...${RESET}"
-        if docker exec "$DB_CONTAINER" bash -c "if [ -f /var/lib/postgresql/data/pg_hba.conf ]; then sed -i.bak 's/scram-sha-256/trust/g' /var/lib/postgresql/data/pg_hba.conf && if command -v pg_ctl >/dev/null; then pg_ctl reload; else pkill -HUP postgres; fi && echo 'Trust authentication enabled'; fi" 2>/dev/null | grep -q "Trust authentication enabled"; then
-            echo -e "${GREEN}Successfully enabled trust authentication${RESET}"
-            # Empty password because we're using trust authentication
-            DB_WORKING_PASSWORD=""
-        else
-            echo -e "${RED}Could not enable trust authentication - continuing anyway${RESET}"
-        fi
-    fi
-    
-    # Use tee to capture output while also displaying it in real-time
-    echo -e "${YELLOW}Executing docker command with output capture...${RESET}"
-    
-    # Create timestamp for tracking execution time
-    START_TIME=$(date +%s)
-    
-    # Log file for capturing all output
-    LOG_FILE="/tmp/odoo_init_output.log"
-    
-    echo "-------------- $(date) --------------" > "$LOG_FILE"
-    echo "Starting initialization with container: $TEMP_CONTAINER" >> "$LOG_FILE"
-    echo "Database: $DB_NAME on host: $DB_IP" >> "$LOG_FILE"
-    echo "Network: $DOCKER_NETWORK" >> "$LOG_FILE"
-    echo "Using username: $DB_USER" >> "$LOG_FILE"
-    echo "" >> "$LOG_FILE"
-    
-    # Determine best DB_HOST value based on connection test
-    DB_HOST_VALUE="db"
-    if [ -n "$DB_IP" ]; then
-        echo -e "${YELLOW}Using direct IP address for database connection: $DB_IP${RESET}"
-        DB_HOST_VALUE="$DB_IP"
-    fi
-    
-    # Run with timeout to prevent hanging indefinitely (30 minutes)
-    echo -e "${YELLOW}Running command with DB_USER=$DB_USER and custom host=$DB_HOST_VALUE${RESET}"
-    timeout 1800 docker run --rm \
-        --name "$TEMP_CONTAINER" \
-        --network="$DOCKER_NETWORK" \
-        -v "$PWD/enterprise:/mnt/enterprise:z" \
-        -v "$PWD/addons:/mnt/extra-addons:z" \
-        -e "DB_HOST=$DB_HOST_VALUE" \
-        -e "DB_PORT=5432" \
-        -e "DB_USER=$DB_USER" \
-        -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
-        -e "LANG=C.UTF-8" \
-        -e "TZ=UTC" \
-        "$ODOO_IMAGE" \
-        -- \
-        --stop-after-init \
-        --init=base,web \
-        --load-language=en_US \
-        --without-demo=all \
-        --log-level=info \
-        -d "$DB_NAME" \
-        --db_host="$DB_HOST_VALUE" \
-        --db_port=5432 \
-        --db_user="$DB_USER" \
-        --db_password="$DB_WORKING_PASSWORD" 2>&1 | tee -a "$LOG_FILE"
-    
-    INIT_STATUS=${PIPESTATUS[0]}
-    END_TIME=$(date +%s)
-    DURATION=$((END_TIME - START_TIME))
-    
-    echo -e "${YELLOW}Docker command completed with status: $INIT_STATUS (took ${DURATION}s)${RESET}"
-    echo "" >> "$LOG_FILE"
-    echo "Command completed with status: $INIT_STATUS (execution time: ${DURATION}s)" >> "$LOG_FILE"
-    
-    # Check if timeout was reached
-    if [ $INIT_STATUS -eq 124 ]; then
-        echo -e "${RED}TIMEOUT REACHED: Command exceeded the 30-minute limit${RESET}"
-        echo "TIMEOUT REACHED: Command exceeded the 30-minute limit" >> "$LOG_FILE"
-    fi
-    
-    # Check if container is still running (should not be with --rm, but check anyway)
-    if docker ps -a | grep -q "$TEMP_CONTAINER"; then
-        echo -e "${RED}WARNING: Container $TEMP_CONTAINER is still present despite --rm flag${RESET}"
-        echo "Container state:" >> "$LOG_FILE"
-        docker inspect "$TEMP_CONTAINER" >> "$LOG_FILE" 2>&1 || echo "Failed to inspect container" >> "$LOG_FILE"
-        echo -e "${YELLOW}Attempting to force remove the container...${RESET}"
-        docker rm -f "$TEMP_CONTAINER" >> "$LOG_FILE" 2>&1 || echo "Failed to remove container" >> "$LOG_FILE"
-    fi
-    
-    # If we captured output, display the last few lines for debugging
-    if [ -f "$LOG_FILE" ]; then
-        echo -e "${YELLOW}Last 30 lines of output:${RESET}"
-        tail -n 30 "$LOG_FILE"
-        
-        # Search for specific error patterns
-        echo -e "${YELLOW}Checking for common errors in the log:${RESET}"
-        if grep -q "connection refused" "$LOG_FILE"; then
-            echo -e "${RED}ERROR: Database connection refused. Check if PostgreSQL is running and accessible.${RESET}"
-        fi
-        if grep -q "password authentication failed" "$LOG_FILE"; then
-            echo -e "${RED}ERROR: Database password authentication failed. Check credentials.${RESET}"
-        fi
-        if grep -q "could not connect to server" "$LOG_FILE"; then
-            echo -e "${RED}ERROR: Could not connect to database server. Network issue or incorrect hostname.${RESET}"
-        fi
-        
-        echo -e "${YELLOW}Full log available at: $LOG_FILE${RESET}"
-    fi
-    
-    # Re-enable exit on error
-    set -e
-    
-    echo -e "${YELLOW}Container finished with status: $INIT_STATUS${RESET}"
-    
-    # Restore PostgreSQL authentication configuration if we modified it
-    if docker exec "$DB_CONTAINER" bash -c "if [ -f /var/lib/postgresql/data/pg_hba.conf.bak ]; then mv /var/lib/postgresql/data/pg_hba.conf.bak /var/lib/postgresql/data/pg_hba.conf && if command -v pg_ctl >/dev/null; then pg_ctl reload; else pkill -HUP postgres; fi && echo 'Configuration restored'; fi" 2>/dev/null | grep -q "Configuration restored"; then
-        echo -e "${GREEN}Restored original PostgreSQL authentication configuration${RESET}"
-    fi
-    
-    if [ $INIT_STATUS -ne 0 ]; then
+    if [ "$INIT_STATUS" != "0" ]; then
         ERROR "Database initialization failed with exit code $INIT_STATUS"
-        echo -e "${RED}Database initialization failed. Attempting to gather diagnostic information...${RESET}"
+        echo -e "${RED}Database initialization failed. Checking container logs...${RESET}"
         
-        # Check if the database was partially initialized
-        echo -e "${YELLOW}Checking if database was partially initialized...${RESET}"
-        TABLE_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        # Show container logs to help diagnose the issue
+        docker logs --tail 30 "$CONTAINER_NAME"
         
-        if [ "$TABLE_COUNT" -gt 0 ]; then
-            echo -e "${YELLOW}Database contains $TABLE_COUNT tables. Partial initialization may have occurred.${RESET}"
-            
-            # Check for known tables
-            echo -e "${YELLOW}Checking for key Odoo tables...${RESET}"
-            for table in "ir_module_module" "res_users" "ir_model"; do
-                EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$table');" 2>/dev/null | tr -d '[:space:]' || echo "f")
-                echo -e "Table $table: $([ "$EXISTS" = "t" ] && echo "${GREEN}exists${RESET}" || echo "${RED}missing${RESET}")"
-            done
-            
-            # Despite failure, if we have some tables, we might try to continue
-            if [ "$TABLE_COUNT" -gt 10 ] && docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module');" 2>/dev/null | grep -q "t"; then
-                echo -e "${YELLOW}Database appears to be partially initialized with critical tables. Will attempt to continue.${RESET}"
-                WARNING "Database partially initialized. Attempting to continue despite initialization failure."
-            else
-                echo -e "${RED}Database initialization incomplete. Not enough tables or missing critical tables.${RESET}"
-                # Try to display any log messages from the database container as well
-                echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
-                docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
-                
-                # Check if the odoo container is accessible on the network
-                echo -e "${YELLOW}Checking network connectivity details:${RESET}"
-                echo "Docker network configuration for $DOCKER_NETWORK:"
-                docker network inspect "$DOCKER_NETWORK" | grep -A 20 "Containers" || true
-                
-                docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-                return 1
-            fi
-        else
-            # No tables at all - complete failure
-            echo -e "${RED}No tables found in database. Initialization completely failed.${RESET}"
-            # Try to display any log messages from the database container as well
-            echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
-            docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
-            
-            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-            return 1
-        fi
-    else
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully!"
-    fi
-    
-    # Restart the main Odoo container
-    INFO "Restarting main Odoo container..."
-    docker start "$CONTAINER_NAME" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        ERROR "Failed to restart main Odoo container."
-        echo -e "${RED}Failed to restart the main Odoo container. Checking container status...${RESET}"
-        docker ps -a | grep "$CONTAINER_NAME" || true
+        # Restart the container with normal configuration
+        docker compose up -d
         return 1
     fi
     
-    # Wait for container to be fully up with clear progress indication
-    echo -e "${YELLOW}Waiting for Odoo container to fully start...${RESET}"
-    wait_for_container "$CONTAINER_NAME" 30 2
+    # Restart the container with normal configuration
+    INFO "Restarting Odoo container with normal configuration..."
+    echo -e "${YELLOW}Restarting Odoo with normal configuration...${RESET}"
+    docker compose up -d
     
-    # Verify database initialization
+    # Wait for container to be fully up
+    echo -e "${YELLOW}Waiting for Odoo container to fully start...${RESET}"
+    sleep 10
+    
+    # Verify database initialization by checking tables
     INFO "Verifying database initialization..."
     echo -e "${CYAN}Verifying database tables...${RESET}"
     
-    # Check if we can connect to the database
-    if ! docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
-        ERROR "Cannot connect to the newly created database as user $DB_USER"
-        echo -e "${RED}Failed to connect to the database after initialization.${RESET}"
-        return 1
-    fi
-    
-    # Count tables
+    # Count tables to verify initialization was successful
     TABLE_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
     
     if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 20 ]; then
         ERROR "Database verification failed. Expected at least 20 tables, found: $TABLE_COUNT"
         echo -e "${RED}Database validation failed. Only $TABLE_COUNT tables found (expected >20).${RESET}"
-        
-        # List the tables that do exist for diagnostic purposes
-        echo -e "${YELLOW}Tables in database:${RESET}"
-        docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' LIMIT 30;" || true
-        
         return 1
+    else
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully with $TABLE_COUNT tables."
+        INFO "Database initialization completed successfully with $TABLE_COUNT tables."
+        return 0
     fi
-    
-    # Verify specific critical tables exist
-    echo -e "${CYAN}Checking for critical tables...${RESET}"
-    CRITICAL_TABLES=("ir_module_module" "res_users" "ir_model" "res_company")
-    MISSING_TABLES=()
-    
-    for table in "${CRITICAL_TABLES[@]}"; do
-        TABLE_EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$table');" 2>/dev/null | tr -d '[:space:]')
-        if [ "$TABLE_EXISTS" != "t" ]; then
-            ERROR "Critical table '$table' not found in database."
-            MISSING_TABLES+=("$table")
-        else
-            echo -e "${GREEN}✓ Table $table exists${RESET}"
-        fi
-    done
-    
-    if [ ${#MISSING_TABLES[@]} -gt 0 ]; then
-        ERROR "Database is missing critical tables: ${MISSING_TABLES[*]}"
-        echo -e "${RED}Database initialization is incomplete. Missing tables: ${MISSING_TABLES[*]}${RESET}"
-        return 1
-    fi
-    
-    echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully with $TABLE_COUNT tables created."
-    INFO "Database initialization completed successfully with $TABLE_COUNT tables created."
-    return 0
 }
 
 # Check service health
