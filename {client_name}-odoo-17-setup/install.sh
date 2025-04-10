@@ -87,14 +87,6 @@ echo "CONTAINER_NAME: $CONTAINER_NAME"
 echo "DB_PASS length: ${#DB_PASS} characters"
 echo "==== END DIAGNOSTIC INFO ===="
 
-# Check if template variables were properly replaced
-if [[ "$INSTALL_DIR" == *"{client_name}-odoo-17"* ]]; then
-    echo -e "${RED}ERROR: Template variables were not properly replaced!${RESET}"
-    echo -e "${RED}This script should be processed by create_client_setup.py first.${RESET}"
-    echo -e "${RED}Variables like {client_name} and {client_password} should be replaced.${RESET}"
-    exit 1
-fi
-
 # Store system information
 SYS_MEMORY=""
 SYS_CPU=""
