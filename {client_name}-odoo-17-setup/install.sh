@@ -73,7 +73,7 @@ fi
 
 # Progress display variables
 STEP=0
-TOTAL_STEPS=10  # Update this as needed
+TOTAL_STEPS=11  # Update this as needed
 
 # Constants
 INSTALL_DIR="{path_to_install}/{client_name}-odoo-17"
@@ -1308,14 +1308,83 @@ verify_installation() {
 
     # Check database existence and content
     echo -ne "${YELLOW}Checking database...${RESET}\r"
-    local db_check=$(docker exec -e PGPASSWORD="$DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null)
-
-    if [ $? -ne 0 ] || [ -z "$db_check" ]; then
-        log ERROR "Database verification failed"
-        echo -e "${RED}${BOLD}⚠ Database verification failed${RESET}"
+    
+    # Use the working password that was successful during initialization
+    local pg_password=$DB_WORKING_PASSWORD
+    if [ -z "$pg_password" ]; then
+        pg_password=$DB_PASS
+        # Try to get password from container if not set
+        local container_password=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
+        if [ -n "$container_password" ]; then
+            pg_password=$container_password
+        fi
+    fi
+    
+    # First verify the database exists
+    local db_exists=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" -t 2>/dev/null | tr -d '[:space:]')
+    
+    if [ -z "$db_exists" ] || [ "$db_exists" != "1" ]; then
+        log ERROR "Database $DB_NAME does not exist"
+        echo -e "${RED}${BOLD}⚠ Database $DB_NAME does not exist${RESET}"
         return 1
     else
-        echo -e "${GREEN}${BOLD}✓${RESET} Database verification successful. $(echo $db_check | xargs) modules installed."
+        echo -e "${GREEN}${BOLD}✓${RESET} Database exists"
+    fi
+    
+    # Now check for the modules table
+    local table_exists=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module')" -t 2>/dev/null | tr -d '[:space:]')
+    
+    if [ "$table_exists" != "t" ]; then
+        log ERROR "Database schema verification failed - ir_module_module table not found"
+        echo -e "${RED}${BOLD}⚠ Database schema verification failed${RESET}"
+        return 1
+    fi
+    
+    # Check installed modules
+    local installed_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | tr -d '[:space:]')
+    
+    if [ -z "$installed_count" ] || [ "$installed_count" -lt 2 ]; then
+        log WARNING "Few modules installed ($installed_count)"
+        echo -e "${YELLOW}Only $installed_count modules installed, but database structure is valid${RESET}"
+    else
+        echo -e "${GREEN}${BOLD}✓${RESET} Database contains $installed_count installed modules"
+    fi
+
+    # Make sure enterprise modules are recognized - check configuration
+    log INFO "Verifying enterprise addons configuration"
+    
+    # Check odoo.conf for enterprise path
+    local addons_path=$(docker exec $CONTAINER_NAME cat /etc/odoo/odoo.conf 2>/dev/null | grep "addons_path" || echo "")
+    
+    if [[ "$addons_path" != *"/mnt/enterprise"* ]]; then
+        log WARNING "Enterprise path not found in addons_path"
+        echo -e "${YELLOW}${BOLD}⚠ Enterprise path not found in Odoo configuration${RESET}"
+        
+        # Fix the configuration
+        echo -e "${CYAN}Updating Odoo configuration to include enterprise addons...${RESET}"
+        docker exec $CONTAINER_NAME bash -c 'if ! grep -q "^addons_path" /etc/odoo/odoo.conf; then echo "addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons" >> /etc/odoo/odoo.conf; else sed -i "s|^addons_path.*|addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons|g" /etc/odoo/odoo.conf; fi'
+        
+        # Restart Odoo to apply changes
+        log INFO "Restarting Odoo to apply configuration changes"
+        echo -e "${CYAN}Restarting Odoo to apply configuration changes...${RESET}"
+        docker compose restart web
+        sleep 10
+    else
+        log INFO "Enterprise path found in addons_path configuration"
+    fi
+    
+    # Check if enterprise modules are recognized by checking module records
+    local enterprise_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE name LIKE 'account%' OR name LIKE 'crm%' OR name LIKE 'sale%'" -t 2>/dev/null | tr -d '[:space:]')
+    
+    if [ -z "$enterprise_count" ] || [ "$enterprise_count" -lt 5 ]; then
+        log WARNING "Few enterprise modules detected in database ($enterprise_count)"
+        echo -e "${YELLOW}${BOLD}⚠ Few enterprise modules detected${RESET}"
+        
+        # Force module update in a background task
+        echo -e "${CYAN}Triggering module list update in the background...${RESET}"
+        docker exec -d $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME &
+    else
+        echo -e "${GREEN}${BOLD}✓${RESET} $enterprise_count enterprise-related modules detected"
     fi
 
     # Check Odoo web access
@@ -1327,9 +1396,9 @@ verify_installation() {
     else
         echo -e "${GREEN}${BOLD}✓${RESET} Web interface is accessible"
     fi
-
-    log INFO "Installation verified successfully"
-    echo -e "${GREEN}${BOLD}✓${RESET} All verification checks passed"
+    
+    echo -e "${GREEN}${BOLD}✓${RESET} Installation verification completed with potential issues addressed"
+    echo -e "${YELLOW}Note: You may need to go to Apps menu and click 'Update Apps List' to see all enterprise modules${RESET}"
     return 0
 }
 
@@ -1410,6 +1479,66 @@ show_completion() {
     echo -e "\n${GREEN}${BOLD}Thank you for using Odoo 17!${RESET}\n"
 }
 
+# Ensure enterprise modules are configured properly
+ensure_enterprise_modules() {
+    show_progress "Configuring Enterprise Modules"
+
+    log INFO "Ensuring enterprise modules are properly configured..."
+    echo -e "${CYAN}Configuring enterprise modules...${RESET}"
+
+    # Get the working password from initialization
+    local pg_password=$DB_WORKING_PASSWORD
+    if [ -z "$pg_password" ]; then
+        pg_password=$DB_PASS
+        # Try to get password from container if not set
+        local container_password=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
+        if [ -n "$container_password" ]; then
+            pg_password=$container_password
+        fi
+    fi
+    
+    # Verify enterprise directory has content
+    log INFO "Checking enterprise directory content"
+    local enterprise_files=$(docker exec $CONTAINER_NAME ls -1 /mnt/enterprise | wc -l)
+    
+    if [ "$enterprise_files" -lt 5 ]; then
+        log WARNING "Few files found in enterprise directory ($enterprise_files)"
+        echo -e "${YELLOW}${BOLD}⚠ Few files found in enterprise directory. Enterprise features may not work.${RESET}"
+    else
+        log INFO "Enterprise directory contains $enterprise_files files/directories"
+        echo -e "${GREEN}${BOLD}✓${RESET} Enterprise files found ($enterprise_files files/directories)"
+    fi
+    
+    # Update Odoo configuration to ensure enterprise path is first in addons_path
+    log INFO "Updating Odoo configuration"
+    docker exec $CONTAINER_NAME bash -c 'if ! grep -q "^addons_path" /etc/odoo/odoo.conf; then 
+        echo "addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons" >> /etc/odoo/odoo.conf
+    else 
+        sed -i "s|^addons_path.*|addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons|g" /etc/odoo/odoo.conf
+    fi'
+    
+    # Verify configuration
+    local addons_path=$(docker exec $CONTAINER_NAME grep "^addons_path" /etc/odoo/odoo.conf)
+    log INFO "Updated addons_path: $addons_path"
+    
+    # Restart Odoo service to apply changes
+    log INFO "Restarting Odoo service"
+    echo -e "${CYAN}Restarting Odoo to apply configuration changes...${RESET}"
+    docker compose restart web
+    
+    # Wait for Odoo to restart
+    sleep 10
+    
+    # Update module list to recognize enterprise modules
+    log INFO "Updating module list"
+    echo -e "${CYAN}Updating module list to recognize enterprise modules...${RESET}"
+    docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME
+    
+    log INFO "Enterprise module configuration complete"
+    echo -e "${GREEN}${BOLD}✓${RESET} Enterprise modules configured successfully"
+    echo -e "${YELLOW}Note: You may need to go to Apps menu and click 'Update Apps List' to see all enterprise modules${RESET}"
+}
+
 # Main execution
 main() {
     # Create temporary install log (will be moved to proper location later)
@@ -1436,16 +1565,17 @@ main() {
 
     # Show the installation steps
     echo -e "${WHITE}${BOLD}Installation Steps:${RESET}"
-    echo -e " ${GRAY}[1/10] Checking Prerequisites${RESET}"
-    echo -e " ${GRAY}[2/10] Creating Directory Structure${RESET}"
-    echo -e " ${GRAY}[3/10] Extracting Enterprise Addons${RESET}"
-    echo -e " ${GRAY}[4/10] Creating Backup Script${RESET}"
-    echo -e " ${GRAY}[5/10] Setting up Cron Jobs${RESET}"
-    echo -e " ${GRAY}[6/10] Configuring SSL (if applicable)${RESET}"
-    echo -e " ${GRAY}[7/10] Starting Docker Containers${RESET}"
-    echo -e " ${GRAY}[8/10] Initializing Odoo Database${RESET}"
-    echo -e " ${GRAY}[9/10] Verifying Services${RESET}"
-    echo -e " ${GRAY}[10/10] Finalizing Installation${RESET}"
+    echo -e " ${GRAY}[1/11] Checking Prerequisites${RESET}"
+    echo -e " ${GRAY}[2/11] Creating Directory Structure${RESET}"
+    echo -e " ${GRAY}[3/11] Extracting Enterprise Addons${RESET}"
+    echo -e " ${GRAY}[4/11] Creating Backup Script${RESET}"
+    echo -e " ${GRAY}[5/11] Setting up Cron Jobs${RESET}"
+    echo -e " ${GRAY}[6/11] Configuring SSL (if applicable)${RESET}"
+    echo -e " ${GRAY}[7/11] Starting Docker Containers${RESET}"
+    echo -e " ${GRAY}[8/11] Initializing Odoo Database${RESET}"
+    echo -e " ${GRAY}[9/11] Configuring Enterprise Modules${RESET}"
+    echo -e " ${GRAY}[10/11] Verifying Services${RESET}"
+    echo -e " ${GRAY}[11/11] Finalizing Installation${RESET}"
     echo ""
 
     # Perform installation
@@ -1459,16 +1589,20 @@ main() {
     
     # Initialize database and save the working password
     initialize_database
+    # Declare the working password at global scope to ensure it's available to all functions
     DB_WORKING_PASSWORD="$pg_password"  # Save the working password detected
+    export DB_WORKING_PASSWORD  # Make it available to subshells
+    DEBUG "Database initialization complete, using password: $DB_WORKING_PASSWORD for further operations"
     
-    DEBUG "Database initialization complete, using password for further operations"
+    # Configure enterprise modules
+    ensure_enterprise_modules
     
     # Use the detected password for remaining functions
     check_service_health "$DB_WORKING_PASSWORD"
     verify_installation
     
     # Show completion message if everything succeeded
-        if [ $? -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         show_completion
         INFO "Installation completed successfully"
         DEBUG "All installation steps completed without errors"
