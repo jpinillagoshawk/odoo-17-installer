@@ -1013,11 +1013,11 @@ setup_ssl_config() {
             fi
         else
             log INFO "$file not found in parent or current directory, skipping"
-        fi
-        
-        # Make executable if it's a script
-        if [[ "$file" == *.sh ]]; then
-            chmod +x "$INSTALL_DIR/$file"
+            fi
+            
+            # Make executable if it's a script
+            if [[ "$file" == *.sh ]]; then
+                chmod +x "$INSTALL_DIR/$file"
         fi
     done
 
@@ -1080,8 +1080,8 @@ initialize_database() {
         ERROR "PostgreSQL container $DB_CONTAINER is not running. Starting it now..."
         cd "$INSTALL_DIR"
         docker compose up -d db
-        sleep 10
-        
+    sleep 10
+
         if ! docker ps | grep -q "$DB_CONTAINER"; then
             ERROR "Failed to start PostgreSQL container $DB_CONTAINER"
             return 1
@@ -1109,7 +1109,42 @@ initialize_database() {
     echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
     INFO "Checking if database user '$DB_USER' exists..."
     
-    USER_CHECK_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';" 2>&1)
+    # First, check if postgres role exists and determine the admin user
+    echo -e "${YELLOW}Checking PostgreSQL admin user...${RESET}"
+    INFO "Checking PostgreSQL admin user configuration..."
+    
+    # Test if postgres user exists
+    POSTGRES_TEST=$(docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1;" 2>&1)
+    POSTGRES_STATUS=$?
+    
+    if [ $POSTGRES_STATUS -eq 0 ]; then
+        # postgres user exists and works
+        DB_ADMIN_USER="postgres"
+        INFO "Using standard 'postgres' admin user"
+    else
+        # Try to identify what admin user exists by checking process list
+        echo -e "${YELLOW}postgres role not found, determining alternate admin user...${RESET}"
+        PSQL_PROC=$(docker exec "$DB_CONTAINER" ps aux | grep postgres)
+        
+        # Check if we can find the username that's running PostgreSQL
+        if echo "$PSQL_PROC" | grep -q "\-D"; then
+            # Extract username from process
+            DB_ADMIN_USER=$(echo "$PSQL_PROC" | grep "\-D" | awk '{print $1}' | head -1)
+            echo -e "${GREEN}Found alternate admin user: $DB_ADMIN_USER${RESET}"
+            INFO "Found alternate admin user: $DB_ADMIN_USER"
+        else
+            # Default to 'postgres' and we'll handle errors later
+            DB_ADMIN_USER="postgres"
+            echo -e "${YELLOW}Could not determine admin user, trying with 'postgres'${RESET}"
+            INFO "Could not determine admin user, trying with 'postgres'"
+        fi
+    fi
+    
+    # Ensure the odoo user's password matches the POSTGRES_PASSWORD
+    echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
+    INFO "Checking if database user '$DB_USER' exists..."
+    
+    USER_CHECK_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';" 2>&1)
     USER_CHECK_STATUS=$?
     
     if [ $USER_CHECK_STATUS -ne 0 ]; then
@@ -1122,7 +1157,7 @@ initialize_database() {
         echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
         INFO "Creating database user $DB_USER..."
         
-        USER_CREATE_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+        USER_CREATE_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         USER_CREATE_STATUS=$?
         
         if [ $USER_CREATE_STATUS -ne 0 ]; then
@@ -1131,19 +1166,37 @@ initialize_database() {
             echo -e "${YELLOW}Trying alternative approach to create user...${RESET}"
             
             # Try alternative approach with createuser command
-            ALT_USER_RESULT=$(docker exec -u postgres "$DB_CONTAINER" createuser -s "$DB_USER" 2>&1)
+            ALT_USER_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" createuser -s "$DB_USER" 2>&1)
             ALT_USER_STATUS=$?
             
             if [ $ALT_USER_STATUS -ne 0 ]; then
                 ERROR "Alternative user creation also failed: $ALT_USER_RESULT"
                 echo -e "${RED}Alternative user creation also failed: $ALT_USER_RESULT${RESET}"
-                echo -e "${RED}Will attempt to continue, but database operations may fail...${RESET}"
+                
+                # Last resort: try using the default user with psql
+                echo -e "${YELLOW}Trying with default PostgreSQL user...${RESET}"
+                INFO "Trying to create user with default PostgreSQL user credentials"
+                
+                LAST_RESORT=$(docker exec "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+                LAST_STATUS=$?
+                
+                if [ $LAST_STATUS -ne 0 ]; then
+                    ERROR "All user creation methods failed: $LAST_RESORT"
+                    echo -e "${RED}All user creation methods failed: $LAST_RESORT${RESET}"
+                    echo -e "${RED}Will attempt to continue, but database operations may fail...${RESET}"
+                else
+                    echo -e "${GREEN}User created with default PostgreSQL credentials${RESET}"
+                    INFO "User created with default PostgreSQL credentials"
+                    
+                    # Now set the password
+                    docker exec "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1
+                fi
             else
                 echo -e "${GREEN}User created with alternative method${RESET}"
                 INFO "User created with alternative method"
                 
                 # Now set the password
-                PASS_SET_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+                PASS_SET_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
                 PASS_SET_STATUS=$?
                 
                 if [ $PASS_SET_STATUS -ne 0 ]; then
@@ -1162,7 +1215,7 @@ initialize_database() {
         echo -e "${YELLOW}Setting password for existing user $DB_USER...${RESET}"
         INFO "Setting password for existing user $DB_USER..."
         
-        PASS_UPDATE_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+        PASS_UPDATE_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         PASS_UPDATE_STATUS=$?
         
         if [ $PASS_UPDATE_STATUS -ne 0 ]; then
@@ -1177,62 +1230,75 @@ initialize_database() {
     
     echo -e "${GREEN}Database user password synchronization completed${RESET}"
     INFO "Database user password synchronization completed"
-    
+
     # Prepare database: Drop if exists and create new
-    INFO "Preparing clean database state for $DB_NAME..."
+    echo -e "${YELLOW}Preparing database: Checking for existing database...${RESET}"
+    INFO "Checking if database '$DB_NAME' exists..."
     
-    # Check if PostgreSQL is responsive first
-    INFO "Checking if PostgreSQL is responsive..."
-    if ! docker exec "$DB_CONTAINER" pg_isready -q; then
-        ERROR "PostgreSQL is not responsive in container $DB_CONTAINER"
-        return 1
-    fi
+    # Check if the database exists
+    DB_EXISTS=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -lqt | cut -d \| -f 1 | grep -w "$DB_NAME" | wc -l)
     
-    # Terminate existing connections to allow dropping the database
-    INFO "Terminating existing connections to database..."
-    TERM_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1)
-    TERM_STATUS=$?
-    if [ $TERM_STATUS -ne 0 ]; then
-        WARNING "Failed to terminate connections: $TERM_RESULT"
-        echo -e "${YELLOW}Failed to terminate connections, but continuing...${RESET}"
-    fi
-    
-    # Drop existing database if it exists
-    INFO "Dropping existing database if it exists..."
-    DROP_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
-    DROP_STATUS=$?
-    if [ $DROP_STATUS -ne 0 ]; then
-        ERROR "Failed to drop database: $DROP_RESULT"
-        echo -e "${RED}Failed to drop database: $DROP_RESULT${RESET}"
-        echo -e "${YELLOW}Will attempt to continue with database creation...${RESET}"
+    if [ "$DB_EXISTS" -eq 1 ]; then
+        echo -e "${YELLOW}Database '$DB_NAME' exists. Terminating connections and dropping database...${RESET}"
+        INFO "Database '$DB_NAME' exists. Terminating connections first..."
+        
+        # Terminate existing connections
+        TERM_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1)
+        TERM_STATUS=$?
+        
+        if [ $TERM_STATUS -ne 0 ]; then
+            WARN "Failed to terminate connections: $TERM_RESULT"
+            echo -e "${YELLOW}Warning: Failed to terminate database connections: $TERM_RESULT${RESET}"
+            echo -e "${YELLOW}Will attempt to drop database anyway...${RESET}"
+        else
+            echo -e "${GREEN}Database connections terminated successfully${RESET}"
+            INFO "Database connections terminated successfully"
+        fi
+        
+        # Drop the database
+        DROP_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+        DROP_STATUS=$?
+        
+        if [ $DROP_STATUS -ne 0 ]; then
+            ERROR "Failed to drop database: $DROP_RESULT"
+            echo -e "${RED}Failed to drop database: $DROP_RESULT${RESET}"
+            echo -e "${YELLOW}Will attempt to continue by creating a new database anyway...${RESET}"
+        else
+            echo -e "${GREEN}Database dropped successfully${RESET}"
+            INFO "Database dropped successfully"
+        fi
     else
-        echo -e "${GREEN}Successfully dropped database if it existed${RESET}"
+        echo -e "${YELLOW}Database '$DB_NAME' does not exist, proceeding with creation...${RESET}"
+        INFO "Database '$DB_NAME' does not exist, proceeding with creation..."
     fi
     
-    # Create fresh database
-    INFO "Creating new database $DB_NAME with owner $DB_USER..."
-    CREATE_DB_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
-    CREATE_DB_STATUS=$?
-    if [ $CREATE_DB_STATUS -ne 0 ]; then
-        ERROR "Failed to create database: $CREATE_DB_RESULT"
-        echo -e "${RED}Failed to create database: $CREATE_DB_RESULT${RESET}"
+    # Create a new database
+    echo -e "${YELLOW}Creating database '$DB_NAME' with owner '$DB_USER'...${RESET}"
+    INFO "Creating database '$DB_NAME' with owner '$DB_USER'..."
+    
+    CREATE_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
+    CREATE_STATUS=$?
+    
+    if [ $CREATE_STATUS -ne 0 ]; then
+        ERROR "Failed to create database: $CREATE_RESULT"
+        echo -e "${RED}Failed to create database: $CREATE_RESULT${RESET}"
         echo -e "${YELLOW}Trying alternative approach to create database...${RESET}"
         
         # Try alternative approach with createdb command
-        ALT_DB_RESULT=$(docker exec "$DB_CONTAINER" createdb -O "$DB_USER" "$DB_NAME" 2>&1)
-        ALT_DB_STATUS=$?
-        if [ $ALT_DB_STATUS -ne 0 ]; then
-            ERROR "Alternative database creation also failed: $ALT_DB_RESULT"
-            echo -e "${RED}Alternative database creation also failed: $ALT_DB_RESULT${RESET}"
-            echo -e "${RED}Unable to proceed without a database. Please check PostgreSQL configuration.${RESET}"
-            return 1
+        ALT_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" createdb -O "$DB_USER" "$DB_NAME" 2>&1)
+        ALT_STATUS=$?
+        
+        if [ $ALT_STATUS -ne 0 ]; then
+            ERROR "Alternative database creation also failed: $ALT_RESULT"
+            echo -e "${RED}Alternative database creation also failed: $ALT_RESULT${RESET}"
+            echo -e "${RED}Database initialization might not complete successfully${RESET}"
         else
-            echo -e "${GREEN}Database created successfully with alternative method${RESET}"
-            INFO "Database created successfully with alternative method"
+            echo -e "${GREEN}Database created with alternative method${RESET}"
+            INFO "Database created with alternative method"
         fi
     else
-        echo -e "${GREEN}Database $DB_NAME created successfully${RESET}"
-        INFO "Database $DB_NAME created successfully"
+        echo -e "${GREEN}Database created successfully${RESET}"
+        INFO "Database created successfully"
     fi
     
     # Backup the original docker-compose.yml
@@ -1332,7 +1398,7 @@ initialize_database() {
     if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 20 ]; then
         ERROR "Database verification failed. Expected at least 20 tables, found: $TABLE_COUNT"
         echo -e "${RED}Database validation failed. Only $TABLE_COUNT tables found (expected >20).${RESET}"
-        return 1
+    return 1
     else
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully with $TABLE_COUNT tables."
         INFO "Database initialization completed successfully with $TABLE_COUNT tables."
