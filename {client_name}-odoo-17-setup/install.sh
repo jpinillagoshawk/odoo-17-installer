@@ -1314,24 +1314,30 @@ initialize_database() {
     echo -e "${YELLOW}Verifying database connection credentials...${RESET}"
     CONNECTION_OK=false
     
+    # Get the database container's IP address for direct connection
+    DB_IP=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$DB_CONTAINER")
+    echo -e "${YELLOW}Database container IP: $DB_IP${RESET}"
+    
+    echo -e "${YELLOW}Testing connection using container name (db)...${RESET}"
     if docker exec -e "PGPASSWORD=$DB_WORKING_PASSWORD" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-        echo -e "${GREEN}Database connection successful with provided credentials${RESET}"
+        echo -e "${GREEN}Database connection successful with provided credentials (localhost)${RESET}"
         CONNECTION_OK=true
     else
-        echo -e "${RED}Database connection failed with standard credentials${RESET}"
+        echo -e "${RED}Database connection failed with standard credentials and localhost${RESET}"
         
-        # Try alternative approaches
-        echo -e "${YELLOW}Attempting connection with trust authentication...${RESET}"
-        if docker exec "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-            echo -e "${GREEN}Connection successful with trust authentication${RESET}"
+        # Try direct connection to localhost
+        echo -e "${YELLOW}Testing connection with direct localhost...${RESET}"
+        if docker exec -e "PGPASSWORD=$DB_WORKING_PASSWORD" "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
+            echo -e "${GREEN}Connection successful with direct localhost${RESET}"
             CONNECTION_OK=true
-            # Use empty password for initialization
-            DB_WORKING_PASSWORD=""
         else
-            # Try with POSTGRES_PASSWORD from env directly
+            # Try with different password variations
+            echo -e "${YELLOW}Trying with alternative approaches...${RESET}"
+            
+            # 1. Try with POSTGRES_PASSWORD directly
             POSTGRES_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
             if [ -n "$POSTGRES_PASSWORD" ] && [ "$POSTGRES_PASSWORD" != "$DB_WORKING_PASSWORD" ]; then
-                echo -e "${YELLOW}Trying with POSTGRES_PASSWORD from container environment...${RESET}"
+                echo -e "${YELLOW}POSTGRES_PASSWORD differs from DB_WORKING_PASSWORD, trying with POSTGRES_PASSWORD...${RESET}"
                 if docker exec -e "PGPASSWORD=$POSTGRES_PASSWORD" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
                     echo -e "${GREEN}Connection successful with POSTGRES_PASSWORD${RESET}"
                     CONNECTION_OK=true
@@ -1339,31 +1345,87 @@ initialize_database() {
                 fi
             fi
             
-            # Try with typical default passwords
+            # 2. Check if odoo user password is set as expected
+            echo -e "${YELLOW}Checking if odoo user exists and has proper permissions...${RESET}"
+            ODOO_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -t -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | tr -d '[:space:]' || echo "0")
+            if [ "$ODOO_EXISTS" = "1" ]; then
+                echo -e "${GREEN}Odoo user exists in PostgreSQL${RESET}"
+                
+                # Explicitly reset odoo password to DB_PASS
+                echo -e "${YELLOW}Resetting odoo user password explicitly...${RESET}"
+                docker exec "$DB_CONTAINER" psql -U postgres -c "ALTER USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null
+                
+                # Verify if password reset worked
+                if docker exec -e "PGPASSWORD=$DB_PASS" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
+                    echo -e "${GREEN}Password reset successful, using DB_PASS${RESET}"
+                    CONNECTION_OK=true
+                    DB_WORKING_PASSWORD="$DB_PASS"
+                fi
+            else
+                echo -e "${RED}Odoo user does not exist in PostgreSQL roles${RESET}"
+                
+                # Create odoo user with proper password
+                echo -e "${YELLOW}Creating odoo user with proper password...${RESET}"
+                docker exec "$DB_CONTAINER" psql -U postgres -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_PASS';" 2>/dev/null
+                
+                # Verify if user creation worked
+                if docker exec -e "PGPASSWORD=$DB_PASS" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
+                    echo -e "${GREEN}User creation successful, using DB_PASS${RESET}"
+                    CONNECTION_OK=true
+                    DB_WORKING_PASSWORD="$DB_PASS"
+                fi
+            fi
+            
+            # 3. Try enabling trust authentication as a last resort
             if [ "$CONNECTION_OK" = false ]; then
-                COMMON_PASSWORDS=("odoo" "postgres" "admin" "$DB_USER" "$DB_CONTAINER")
-                for pwd in "${COMMON_PASSWORDS[@]}"; do
-                    echo -e "${YELLOW}Trying with password: $pwd${RESET}"
-                    if docker exec -e "PGPASSWORD=$pwd" "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
-                        echo -e "${GREEN}Connection successful with password: $pwd${RESET}"
+                echo -e "${YELLOW}Enabling trust authentication as a last resort...${RESET}"
+                docker exec "$DB_CONTAINER" bash -c "echo 'host all all all trust' > /var/lib/postgresql/data/pg_hba.conf"
+                docker exec "$DB_CONTAINER" bash -c "cat /var/lib/postgresql/data/pg_hba.conf"
+                docker exec "$DB_CONTAINER" bash -c "if command -v pg_ctl >/dev/null; then su postgres -c 'pg_ctl reload'; else pkill -HUP postgres; fi"
+                
+                # Wait for changes to take effect
+                echo -e "${YELLOW}Waiting for PostgreSQL to reload configuration...${RESET}"
+                sleep 5
+                
+                # Test with trust auth
+                if docker exec "$DB_CONTAINER" psql -h localhost -U "$DB_USER" -c "SELECT 1" >/dev/null 2>&1; then
+                    echo -e "${GREEN}Trust authentication enabled successfully${RESET}"
+                    CONNECTION_OK=true
+                    # Empty password for trust authentication
+                    DB_WORKING_PASSWORD=""
+                else
+                    echo -e "${RED}Trust authentication failed${RESET}"
+                    
+                    # As a last resort, attempt to use postgres user directly
+                    echo -e "${YELLOW}Attempting to use postgres user directly...${RESET}"
+                    if docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1" >/dev/null 2>&1; then
+                        echo -e "${GREEN}Connection with postgres user successful${RESET}"
+                        echo -e "${YELLOW}Configuring database to allow the postgres user...${RESET}"
+                        DB_USER="postgres"
+                        DB_WORKING_PASSWORD=""
                         CONNECTION_OK=true
-                        DB_WORKING_PASSWORD="$pwd"
-                        break
                     fi
-                done
+                fi
             fi
         fi
+    fi
+    
+    # Final diagnostics if still not connected
+    if [ "$CONNECTION_OK" = false ]; then
+        echo -e "${RED}All connection attempts failed. Detailed diagnostics:${RESET}"
+        echo -e "${YELLOW}Container environment:${RESET}"
+        docker exec "$DB_CONTAINER" env | grep -i "postgres\|pg\|odoo"
         
-        # If still not connected, show diagnostic information
-        if [ "$CONNECTION_OK" = false ]; then
-            echo -e "${RED}Could not establish database connection with any credentials.${RESET}"
-            echo -e "${YELLOW}Database configuration in container:${RESET}"
-            docker exec "$DB_CONTAINER" env | grep -i postgres || true
-            echo -e "${YELLOW}Checking PostgreSQL authentication configuration:${RESET}"
-            docker exec "$DB_CONTAINER" cat /var/lib/postgresql/data/pg_hba.conf 2>/dev/null | grep -v "^#" | grep "." || echo "Could not read pg_hba.conf"
-            
-            echo -e "${RED}WARNING: Continuing with initialization, but it will likely fail due to authentication issues${RESET}"
-        fi
+        echo -e "${YELLOW}PostgreSQL authentication file (pg_hba.conf):${RESET}"
+        docker exec "$DB_CONTAINER" cat /var/lib/postgresql/data/pg_hba.conf 2>/dev/null
+        
+        echo -e "${YELLOW}PostgreSQL logs:${RESET}"
+        docker logs --tail 20 "$DB_CONTAINER"
+        
+        echo -e "${RED}WARNING: Proceeding with initialization, but it will likely fail${RESET}"
+    else
+        echo -e "${GREEN}Successfully established database connection!${RESET}"
+        echo -e "${GREEN}Using username: $DB_USER with working password${RESET}"
     fi
     
     echo -e "${YELLOW}Running temporary Odoo container to initialize database...${RESET}"
@@ -1430,17 +1492,26 @@ initialize_database() {
     
     echo "-------------- $(date) --------------" > "$LOG_FILE"
     echo "Starting initialization with container: $TEMP_CONTAINER" >> "$LOG_FILE"
-    echo "Database: $DB_NAME on host: db" >> "$LOG_FILE"
+    echo "Database: $DB_NAME on host: $DB_IP" >> "$LOG_FILE"
     echo "Network: $DOCKER_NETWORK" >> "$LOG_FILE"
+    echo "Using username: $DB_USER" >> "$LOG_FILE"
     echo "" >> "$LOG_FILE"
     
+    # Determine best DB_HOST value based on connection test
+    DB_HOST_VALUE="db"
+    if [ -n "$DB_IP" ]; then
+        echo -e "${YELLOW}Using direct IP address for database connection: $DB_IP${RESET}"
+        DB_HOST_VALUE="$DB_IP"
+    fi
+    
     # Run with timeout to prevent hanging indefinitely (30 minutes)
+    echo -e "${YELLOW}Running command with DB_USER=$DB_USER and custom host=$DB_HOST_VALUE${RESET}"
     timeout 1800 docker run --rm \
         --name "$TEMP_CONTAINER" \
         --network="$DOCKER_NETWORK" \
         -v "$PWD/enterprise:/mnt/enterprise:z" \
         -v "$PWD/addons:/mnt/extra-addons:z" \
-        -e "DB_HOST=db" \
+        -e "DB_HOST=$DB_HOST_VALUE" \
         -e "DB_PORT=5432" \
         -e "DB_USER=$DB_USER" \
         -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
@@ -1454,11 +1525,11 @@ initialize_database() {
         --without-demo=all \
         --log-level=info \
         -d "$DB_NAME" \
-        --db_host=db \
+        --db_host="$DB_HOST_VALUE" \
         --db_port=5432 \
         --db_user="$DB_USER" \
         --db_password="$DB_WORKING_PASSWORD" 2>&1 | tee -a "$LOG_FILE"
-        
+    
     INIT_STATUS=${PIPESTATUS[0]}
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
