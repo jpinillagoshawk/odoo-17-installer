@@ -3,6 +3,19 @@
 # Odoo 17 Installation Script for {client_name}
 # Created: $(date)
 
+# Process command line arguments
+VERBOSE=false
+while getopts "v" opt; do
+  case $opt in
+    v)
+      VERBOSE=true
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      ;;
+  esac
+done
+
 # Console colors
 if [ -t 1 ]; then
     # Terminal supports colors
@@ -64,7 +77,6 @@ TOTAL_STEPS=10  # Update this as needed
 
 # Constants
 INSTALL_DIR="{path_to_install}/{client_name}-odoo-17"
-VERBOSE=false  # Set to true for more detailed output
 TEMP_LOG="/tmp/odoo_install.log"
 LOG_FILE="$INSTALL_DIR/logs/install.log"
 ODOO_ENTERPRISE_DEB="./odoo_17.0+e.latest_all.deb"
@@ -77,6 +89,79 @@ DB_PASS="{client_password}"
 ADMIN_PASS="{client_password}"
 CONTAINER_NAME="odoo17-{client_name}"
 DB_CONTAINER="db-{client_name}"
+
+# Display usage
+display_usage() {
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  -v    Enable verbose debugging output"
+    echo ""
+    exit 1
+}
+
+# Define log colors
+LOG_COLOR_INFO="\033[0m"      # Default color
+LOG_COLOR_WARNING="\033[33m"  # Yellow
+LOG_COLOR_ERROR="\033[31m"    # Red
+LOG_COLOR_DEBUG="\033[90m"    # Gray
+LOG_COLOR_SUCCESS="\033[32m"  # Green
+LOG_COLOR_RESET="\033[0m"
+
+# Enhanced logging function that replaces the old log()
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local color=""
+    
+    # Add log entry to log file
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    
+    # Only display on console if not called by another logging function
+    # or if verbose mode is enabled for DEBUG level
+    if [[ "$level" != "DEBUG" ]] || [[ "$VERBOSE" == "true" && "$level" == "DEBUG" ]]; then
+        case $level in
+            INFO)     color=$LOG_COLOR_INFO ;;
+            WARNING)  color=$LOG_COLOR_WARNING ;;
+            ERROR)    color=$LOG_COLOR_ERROR ;;
+            DEBUG)    color=$LOG_COLOR_DEBUG ;;
+            SUCCESS)  color=$LOG_COLOR_SUCCESS ;;
+            *)        color=$LOG_COLOR_INFO ;;
+        esac
+        
+        echo -e "${color}[$level] $message${LOG_COLOR_RESET}"
+    fi
+}
+
+INFO() {
+    log "INFO" "$1"
+}
+
+WARNING() {
+    log "WARNING" "$1"
+}
+
+ERROR() {
+    log "ERROR" "$1"
+}
+
+DEBUG() {
+    if [ "$VERBOSE" = true ]; then
+        log "DEBUG" "$1"
+        echo -e "\033[90m[DEBUG] $1\033[0m"  # Gray color for debug output
+    fi
+}
+
+# Display script header
+echo "===================================================="
+echo "           Odoo 17 Enterprise Installation"
+echo "                  {client_name}"
+echo "===================================================="
+echo ""
+if [ "$VERBOSE" = true ]; then
+    echo "Verbose mode enabled. Detailed debug logs will be displayed."
+    echo ""
+fi
 
 # Diagnostic info to verify template substitution is working correctly
 echo "==== DIAGNOSTIC INFO FOR SETUP ===="
@@ -939,216 +1024,272 @@ setup_ssl_config() {
 initialize_database() {
     show_progress "Initializing Odoo Database"
 
-    log INFO "Initializing Odoo database..."
+    INFO "Initializing Odoo database..."
     echo -e "${CYAN}Initializing the Odoo database. This may take a few minutes...${RESET}"
 
     # Wait for services to be ready
     echo -e "${YELLOW}Waiting for services to start...${RESET}"
     sleep 10
+    
+    DEBUG "Starting database initialization process"
+    DEBUG "Target database: $DB_NAME, DB User: $DB_USER"
+    DEBUG "Container names - Odoo: $CONTAINER_NAME, PostgreSQL: $DB_CONTAINER"
 
     # Try to determine the actual password PostgreSQL is using
     local pg_password=$DB_PASS
+    DEBUG "Initial password from script variables (length: ${#pg_password} chars)"
+    
     local postgres_env_password=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
+    DEBUG "Container POSTGRES_PASSWORD environment variable detected (length: ${#postgres_env_password} chars)"
     
     if [ -n "$postgres_env_password" ] && [ "$postgres_env_password" != "$DB_PASS" ]; then
-        log WARNING "POSTGRES_PASSWORD environment variable differs from DB_PASS"
+        WARNING "POSTGRES_PASSWORD environment variable differs from DB_PASS"
         echo -e "${YELLOW}Container password differs from script variable. Trying container password.${RESET}"
+        DEBUG "Using container-provided password instead of script variable"
         pg_password=$postgres_env_password
     fi
     
     # Try authentication with pg_password
-    log INFO "Testing database connection with detected password"
+    INFO "Testing database connection with detected password"
+    DEBUG "Executing psql connection test"
     if ! docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql -h localhost -U $DB_USER -c "SELECT 1" >/dev/null 2>&1; then
-        log WARNING "Authentication with detected password failed, using hardcoded fallback"
+        WARNING "Authentication with detected password failed, using hardcoded fallback"
+        DEBUG "Connection test failed with primary password"
         
         # Hardcoded test with specific common enterprise passwords as a last resort
         local test_passwords=("epitanen" "odoo" "postgres")
         for test_pass in "${test_passwords[@]}"; do
-            log INFO "Testing with fallback password: [redacted]" 
+            DEBUG "Testing fallback password #${#test_pass} chars"
             if docker exec -e PGPASSWORD="$test_pass" $DB_CONTAINER psql -h localhost -U $DB_USER -c "SELECT 1" >/dev/null 2>&1; then
-                log WARNING "Hardcoded fallback password works! Using it for database operations"
+                WARNING "Hardcoded fallback password works! Using it for database operations"
                 echo -e "${YELLOW}Found working fallback password. Using it for database operations${RESET}"
+                DEBUG "Fallback password authentication successful"
                 pg_password=$test_pass
                 break
             fi
         done
     else
-        log INFO "Authentication with detected password successful"
+        INFO "Authentication with detected password successful"
+        DEBUG "Primary password authentication successful"
     fi
     
     # Create connection string for easier reuse
     PG_CONN_STRING="-h db -U $DB_USER -p 5432"
     export PGPASSWORD="$pg_password"
-    log INFO "Using database connection: $PG_CONN_STRING (user=$DB_USER, db=$DB_NAME)"
+    INFO "Using database connection: $PG_CONN_STRING (user=$DB_USER, db=$DB_NAME)"
+    DEBUG "PostgreSQL connection string: $PG_CONN_STRING"
 
-    # Check if database already exists
-    if docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -lqt | grep -q $DB_NAME; then
-        log INFO "Database $DB_NAME already exists"
-        echo -e "${YELLOW}Database $DB_NAME already exists. Checking if it's initialized...${RESET}"
-        
-        # Check if it's initialized (has ir_module_module table)
-        if docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'ir_module_module'" | grep -q "1"; then
-            log INFO "Database is already initialized"
-            echo -e "${GREEN}${BOLD}✓${RESET} Database is already initialized"
-            return 0
-        else
-            # Database exists but is not initialized - we should drop it and recreate
-            log WARNING "Database exists but is not initialized. Dropping and recreating..."
-            echo -e "${YELLOW}Database exists but is not initialized. Dropping and recreating...${RESET}"
-            docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE $DB_NAME;"
-        fi
-    else
-        log INFO "Database does not exist yet. Will create it."
-        echo -e "${CYAN}Database does not exist yet. Will create it.${RESET}"
-    fi
-
-    # Create the database directly first - this avoids initialization when just creating the DB
-    log INFO "Creating empty database..."
-    docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" || true
-    
-    # Method 1: Direct initialization using a separate process
-    log INFO "Initializing database with direct method..."
-    echo -e "${CYAN}Running initialization command...${RESET}"
-    
-    # Debug output to check what values we're actually using
-    log INFO "DEBUG: DB_PASS value length: ${#DB_PASS} characters"
-    log INFO "DEBUG: Using DB_USER=$DB_USER and DB_NAME=$DB_NAME"
-    
-    # Verify the actual docker-compose environment
-    echo -e "${YELLOW}Verifying docker compose environment...${RESET}"
-    
-    # IMPORTANT: Don't stop the web container - use it directly!
-    log INFO "Using existing Odoo container for initialization"
-    echo -e "${YELLOW}Using existing Odoo container for initialization...${RESET}"
-    
-    # Start web container if it's not running
+    # Step 1: Make sure containers are running
+    DEBUG "Ensuring all containers are running"
     cd "$INSTALL_DIR"
-    docker compose up -d web
-    sleep 5
+    docker compose up -d
+    sleep 10
     
-    # Run initialization directly on the existing container
-    # This uses the same network and authentication context as the docker-compose setup
-    log INFO "Running Odoo initialization directly in the container"
-    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base \
-        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$pg_password"
+    # Show current container status
+    if [ "$VERBOSE" = true ]; then
+        DEBUG "Current container status:"
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "$CONTAINER_NAME|$DB_CONTAINER" | while read line; do
+            DEBUG "Container: $line"
+        done
+    fi
+    
+    # Step 2: Clean start - drop existing database if it exists
+    INFO "Dropping existing database if it exists"
+    DEBUG "Executing DROP DATABASE IF EXISTS command"
+    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+    DEBUG "DROP DATABASE result: $docker_output"
+    sleep 2
+    
+    # Step 3: Create empty database with owner
+    INFO "Creating empty database with correct owner"
+    DEBUG "Executing CREATE DATABASE command"
+    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
+    DEBUG "CREATE DATABASE result: $docker_output"
+    sleep 2
+
+    # Step 4: Primary initialization method - use direct Odoo command with full parameters
+    INFO "Initializing database schema with Odoo - METHOD 1"
+    echo -e "${CYAN}Initializing database schema with Odoo...${RESET}"
+    DEBUG "Starting METHOD 1: Direct Odoo initialization with command-line parameters"
+    
+    # If in verbose mode, capture all Odoo output
+    if [ "$VERBOSE" = true ]; then
+        DEBUG "Executing Odoo initialization with full output capture:"
+        DEBUG "Command: odoo --stop-after-init --init=base,web --without-demo=all --load-language=en_US -d $DB_NAME --db_host=db --db_user=$DB_USER"
+        
+        # When in verbose mode, redirect output to both terminal and log file
+        docker exec -e LOG_LEVEL=debug $CONTAINER_NAME odoo --stop-after-init \
+            --init=base,web \
+            --without-demo=all \
+            --load-language=en_US \
+            -d $DB_NAME \
+            --db_host=db \
+            --db_user=$DB_USER \
+            --db_password="$pg_password" 2>&1 | tee -a "$LOG_FILE"
+    else
+        # Normal mode - just run the command
+        docker exec -e LOG_LEVEL=info $CONTAINER_NAME odoo --stop-after-init \
+            --init=base,web \
+            --without-demo=all \
+            --load-language=en_US \
+            -d $DB_NAME \
+            --db_host=db \
+            --db_user=$DB_USER \
+            --db_password="$pg_password"
+    fi
     
     INIT_RESULT=$?
+    DEBUG "METHOD 1 initialization exit code: $INIT_RESULT"
     
-    # Check result
-    if [ $INIT_RESULT -eq 124 ]; then
-        log WARNING "Initialization command timed out but might still be working"
-        echo -e "${YELLOW}Command timed out, but database might still be initializing properly${RESET}"
-        echo -e "${YELLOW}Waiting a bit longer for initialization to complete...${RESET}"
-        sleep 30
-    elif [ $INIT_RESULT -ne 0 ]; then
-        log WARNING "Initialization command failed with exit code $INIT_RESULT"
-        echo -e "${YELLOW}Initialization command failed, trying alternative methods...${RESET}"
-    else
-        log INFO "Initialization command completed successfully"
+    # Check if initialization worked by counting tables
+    DEBUG "Verifying database tables after METHOD 1"
+    local table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
+    DEBUG "Table count after METHOD 1: $table_count"
+    
+    # List some tables if in verbose mode
+    if [ "$VERBOSE" = true ] && [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
+        DEBUG "Listing first 10 tables in database:"
+        table_list=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' LIMIT 10;" -t 2>/dev/null)
+        DEBUG "Tables: $table_list"
     fi
     
-    # Check if initialization succeeded regardless of command result
-    if docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
-        log INFO "Database initialized successfully"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+    if [ "$INIT_RESULT" -eq 0 ] && [ -n "$table_count" ] && [ "$table_count" -gt 20 ]; then
+        INFO "Database initialized successfully - METHOD 1 - $table_count tables created"
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully with $table_count tables"
+        DEBUG "METHOD 1 successful - initialization complete"
         return 0
     fi
-
-    # Method 2: Initialize through docker exec on existing container
-    log INFO "Trying initialization through exec..."
-    echo -e "${CYAN}Trying to initialize through existing container...${RESET}"
     
-    # Ensure web container is running
-    docker compose up -d web
-    sleep 10
+    WARNING "First initialization method failed or incomplete ($table_count tables). Trying METHOD 2..."
+    echo -e "${YELLOW}First initialization method failed or incomplete. Trying METHOD 2...${RESET}"
+    DEBUG "METHOD 1 failed or incomplete. Table count below threshold or other error."
     
-    # Try initialization through exec with --no-http
-    docker exec -e PGPASSWORD="$pg_password" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$pg_password"
+    # Step 5: Alternative Method - Use the Odoo API
+    INFO "Using Odoo API to create database - METHOD 2"
+    echo -e "${CYAN}Using Odoo API to create database...${RESET}"
+    DEBUG "Starting METHOD 2: Database creation through Odoo API"
     
-    # Check if initialization succeeded
-    if docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
-        log INFO "Database initialized successfully via exec method"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
-        return 0
-    fi
-
-    # Method 3: Try database creation via API
-    log INFO "Trying database creation via API..."
-    echo -e "${CYAN}Creating database via web API...${RESET}"
+    # First, drop the database again for a clean start
+    DEBUG "Dropping database again for clean start"
+    docker_output=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+    DEBUG "DROP DATABASE result: $docker_output"
+    sleep 2
     
-    # Ensure web container is running
-    docker compose up -d web
-    sleep 10
+    # Restart web container
+    DEBUG "Restarting Odoo web container"
+    docker compose restart web
+    sleep 15
     
-    # Use API to create database
-    curl -s -X POST \
-        -H "Content-Type: application/json" \
-        -d '{
-            "jsonrpc": "2.0",
-            "method": "call",
-            "params": {
-                "master_pwd": "$pg_password",
-                "name": "'$DB_NAME'",
-                "login": "admin",
-                "password": "$pg_password",
-                "lang": "en_US",
-                "country_code": "es"
-            }
-        }' \
-        http://localhost:8069/web/database/create > /dev/null
+    # Use curl to access the database manager API
+    DEBUG "Building API request for database creation"
+    DEBUG "API endpoint: http://localhost:8069/web/database/create"
+    DEBUG "Using parameters: name=$DB_NAME, login=admin, lang=en_US, country_code=es"
+    
+    # Prepare API request
+    api_request='{
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "master_pwd": "'$pg_password'",
+            "name": "'$DB_NAME'",
+            "login": "admin",
+            "password": "'$pg_password'",
+            "lang": "en_US",
+            "country_code": "es",
+            "phone": ""
+        }
+    }'
+    DEBUG "Sending API request to create database"
+    
+    if [ "$VERBOSE" = true ]; then
+        DEBUG "Full API request (redacted passwords):"
+        echo "$api_request" | sed 's/"master_pwd": "[^"]*"/"master_pwd": "REDACTED"/g' | sed 's/"password": "[^"]*"/"password": "REDACTED"/g' >> "$LOG_FILE"
         
+        # Capture API response in verbose mode
+        api_response=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "$api_request" \
+            http://localhost:8069/web/database/create)
+        
+        DEBUG "API response: $api_response"
+    else
+        # Normal mode - just run the command
+        curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d "$api_request" \
+            http://localhost:8069/web/database/create > /dev/null
+    fi
+    
+    echo -e "${YELLOW}Waiting for database creation to complete...${RESET}"
+    DEBUG "Waiting for database creation to complete (30s)"
     sleep 30
     
-    # Check if initialization succeeded
-    if docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
-        log INFO "Database initialized successfully via API method"
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+    # Check if initialization worked by counting tables again
+    DEBUG "Verifying database tables after METHOD 2"
+    table_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" -t 2>/dev/null | tr -d '[:space:]')
+    DEBUG "Table count after METHOD 2: $table_count"
+    
+    # List some tables if in verbose mode
+    if [ "$VERBOSE" = true ] && [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
+        DEBUG "Listing first 10 tables in database:"
+        table_list=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' LIMIT 10;" -t 2>/dev/null)
+        DEBUG "Tables: $table_list"
+        
+        # Check specifically for ir_module_module table
+        ir_module_check=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module');" -t 2>/dev/null | tr -d '[:space:]')
+        DEBUG "ir_module_module table exists: $ir_module_check"
+        
+        if [ "$ir_module_check" = "t" ]; then
+            # Count installed modules
+            modules_count=$(docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state='installed';" -t 2>/dev/null | tr -d '[:space:]')
+            DEBUG "Number of installed modules: $modules_count"
+        fi
+    fi
+    
+    if [ -n "$table_count" ] && [ "$table_count" -gt 20 ]; then
+        INFO "Database initialized successfully - METHOD 2 - $table_count tables created"
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully with $table_count tables"
+        DEBUG "METHOD 2 successful - initialization complete"
         return 0
     fi
     
-    # Method 4: Full restart with everything fresh
-    log INFO "Trying complete restart with everything fresh..."
-    echo -e "${CYAN}Performing complete restart with clean volumes...${RESET}"
+    ERROR "Database initialization failed after multiple attempts ($table_count tables)"
+    echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
+    DEBUG "Both METHOD 1 and METHOD 2 failed. Database not properly initialized."
+    DEBUG "Final table count: $table_count (expected >20)"
     
-    # Stop everything
-    docker compose down -v  # Use -v to remove volumes
-    sleep 5
-    
-    # Delete all PostgreSQL data to start fresh
-    echo -e "${YELLOW}Clearing existing database data...${RESET}"
-    rm -rf "$INSTALL_DIR/volumes/postgres-data/*" 2>/dev/null || true
-    
-    # Start database container
-    docker compose up -d db
-    sleep 15
-    
-    # Create database explicitly
-    docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
-    
-    # Start web container
-    docker compose up -d web
-    sleep 10
-    
-    # Run initialization command
-    docker exec -e PGPASSWORD="$pg_password" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$pg_password"
-    
-    # Final verification
-    sleep 15
-    if ! docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
-        log ERROR "Database initialization failed after all attempts"
-        echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
-        echo -e "${YELLOW}Try these manual steps:${RESET}"
-        echo -e "${YELLOW}1. Stop all containers: cd $INSTALL_DIR && docker compose down -v${RESET}"
-        echo -e "${YELLOW}2. Remove volumes: rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
-        echo -e "${YELLOW}3. Start fresh: docker compose up -d${RESET}"
-        echo -e "${YELLOW}4. Wait 10 seconds${RESET}"
-        echo -e "${YELLOW}5. Initialize: docker exec -e PGPASSWORD=\\\"$pg_password\\\" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=\\\"$pg_password\\\"${RESET}"
-        return 1
+    # Provide detailed diagnostics if in verbose mode
+    if [ "$VERBOSE" = true ]; then
+        DEBUG "=== DIAGNOSTIC INFORMATION ==="
+        DEBUG "Docker container status:"
+        docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "$CONTAINER_NAME|$DB_CONTAINER" >> "$LOG_FILE"
+        
+        DEBUG "PostgreSQL container logs (last 30 lines):"
+        docker logs --tail 30 $DB_CONTAINER >> "$LOG_FILE" 2>&1
+        
+        DEBUG "Odoo container logs (last 30 lines):"
+        docker logs --tail 30 $CONTAINER_NAME >> "$LOG_FILE" 2>&1
+        
+        DEBUG "Database list:"
+        docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql $PG_CONN_STRING -c "\l" >> "$LOG_FILE" 2>&1
+        
+        DEBUG "Odoo configuration:"
+        docker exec $CONTAINER_NAME cat /etc/odoo/odoo.conf >> "$LOG_FILE" 2>&1 || true
+        
+        DEBUG "Network information:"
+        docker network inspect $(docker inspect $CONTAINER_NAME --format '{{range $key, $value := .NetworkSettings.Networks}}{{$key}}{{end}}') >> "$LOG_FILE" 2>&1
+        
+        DEBUG "=== END DIAGNOSTIC INFORMATION ==="
     fi
-
-    log INFO "Database initialized and ready to use"
-    echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
-    return 0
+    
+    echo -e "${YELLOW}Manual intervention required. Please follow these steps:${RESET}"
+    echo -e "${YELLOW}1. Visit http://$(hostname -I | awk '{print $1}'):8069/web/database/manager${RESET}"
+    echo -e "${YELLOW}2. Choose 'Create Database'${RESET}"
+    echo -e "${YELLOW}3. Set Master Password to: $pg_password${RESET}"
+    echo -e "${YELLOW}4. Set Database Name to: $DB_NAME${RESET}"
+    echo -e "${YELLOW}5. Complete the form and create the database${RESET}"
+    
+    return 1
 }
 
 # Check service health
@@ -1320,19 +1461,43 @@ show_completion() {
     echo -e "\n${GREEN}${BOLD}Thank you for using Odoo 17!${RESET}\n"
 }
 
-# Main installation process
+# Main execution
 main() {
+    # Create temporary install log (will be moved to proper location later)
+    mkdir -p $(dirname "$TEMP_LOG")
+    touch "$TEMP_LOG"
+    
     # Display banner
-    show_banner
+    echo "===================================================="
+    echo "           Odoo 17 Enterprise Installation"
+    echo "                  {client_name}"
+    echo "===================================================="
+    if [ "$VERBOSE" = true ]; then
+        echo -e "${LOG_COLOR_DEBUG}Verbose debugging mode enabled${LOG_COLOR_RESET}"
+        DEBUG "Starting installation process with verbose logging"
+    fi
+    echo ""
+    
+    # Start installation
+    INFO "Starting installation process (Verbose mode: $VERBOSE)"
+    
+    # Create folders for log
+    mkdir -p $(dirname "$LOG_FILE")
+    cat "$TEMP_LOG" > "$LOG_FILE"
 
-    # Create log directory if it doesn't exist
-    mkdir -p "$(dirname "$TEMP_LOG")"
-
-    log INFO "Starting Odoo 17 installation for {client_name}"
-
-    # Analyze system and show summary
-    analyze_system
-    show_summary
+    # Show the installation steps
+    echo -e "${WHITE}${BOLD}Installation Steps:${RESET}"
+    echo -e " ${GRAY}[1/10] Checking Prerequisites${RESET}"
+    echo -e " ${GRAY}[2/10] Creating Directory Structure${RESET}"
+    echo -e " ${GRAY}[3/10] Extracting Enterprise Addons${RESET}"
+    echo -e " ${GRAY}[4/10] Creating Backup Script${RESET}"
+    echo -e " ${GRAY}[5/10] Setting up Cron Jobs${RESET}"
+    echo -e " ${GRAY}[6/10] Configuring SSL (if applicable)${RESET}"
+    echo -e " ${GRAY}[7/10] Starting Docker Containers${RESET}"
+    echo -e " ${GRAY}[8/10] Initializing Odoo Database${RESET}"
+    echo -e " ${GRAY}[9/10] Verifying Services${RESET}"
+    echo -e " ${GRAY}[10/10] Finalizing Installation${RESET}"
+    echo ""
 
     # Perform installation
     check_prerequisites
@@ -1347,51 +1512,24 @@ main() {
     initialize_database
     DB_WORKING_PASSWORD="$pg_password"  # Save the working password detected
     
+    DEBUG "Database initialization complete, using password for further operations"
+    
     # Use the detected password for remaining functions
     check_service_health "$DB_WORKING_PASSWORD"
     verify_installation
-
-    # SSL Configuration
-    if [ -f "$INSTALL_DIR/ssl-config.conf" ] && [ -f "$INSTALL_DIR/ssl-setup.sh" ]; then
-        show_progress "Configuring SSL/HTTPS"
-
-        log INFO "Setting up SSL/HTTPS..."
-        echo -e "${CYAN}Setting up SSL/HTTPS...${RESET}"
-        chmod +x "$INSTALL_DIR/ssl-setup.sh"
-
-        # Run SSL setup script
-        cd "$INSTALL_DIR"
-        ./ssl-setup.sh
-
-        if [ $? -eq 0 ]; then
-            log INFO "SSL setup completed successfully"
-            echo -e "${GREEN}${BOLD}✓${RESET} SSL/HTTPS configured successfully"
-        else
-            log WARNING "SSL setup encountered issues, check ssl-setup.log for details"
-            echo -e "${YELLOW}${BOLD}⚠ SSL setup encountered issues.${RESET}"
-            echo -e "${YELLOW}Check $INSTALL_DIR/logs/ssl-setup.log for details.${RESET}"
-        fi
-    else
-        log INFO "SSL configuration files not found, skipping SSL setup"
-        echo -e "${YELLOW}SSL configuration files not found, skipping SSL setup.${RESET}"
-        echo -e "${YELLOW}To set up SSL later, copy ssl-config.conf.template to ssl-config.conf, edit it, and run ./ssl-setup.sh${RESET}"
-    fi
-
-    log INFO "Starting Docker containers automatically for plug-and-play experience"
-    echo -e "${CYAN}Starting Docker containers...${RESET}"
-    cd "$INSTALL_DIR" && docker compose up -d
     
+    # Show completion message if everything succeeded
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Docker containers started successfully!${RESET}"
-        echo -e "${GREEN}You can access Odoo at http://localhost:{odoo_port}${RESET}"
+        show_completion
+        INFO "Installation completed successfully"
+        DEBUG "All installation steps completed without errors"
     else
-        echo -e "${RED}Failed to start Docker containers. Please check the logs.${RESET}"
-        echo -e "${YELLOW}You can manually start them with: cd $INSTALL_DIR && docker-compose up -d${RESET}"
+        ERROR "Installation failed"
+        DEBUG "Installation process failed - check logs for details"
+        echo -e "\n${RED}${BOLD}⚠ Installation failed. Please check the log file for details.${RESET}"
+        echo -e "Log file: $LOG_FILE"
     fi
-    
-    log INFO "Installation completed successfully"
-    show_completion
 }
 
-# Run main function
-main                                            
+# Execute main function
+main "$@"
