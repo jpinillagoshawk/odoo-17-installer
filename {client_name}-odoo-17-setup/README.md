@@ -49,20 +49,21 @@ sudo ./staging.sh create
 <details>
 <summary>Detailed Installation Steps</summary>
 
-1. Clone this repository to `/{client_name}-odoo-17`:
+1. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/
+   e.g. windows command to send the file through ssh with cmd:
    ```bash
-   scp -r "<path to local install>/*" user@195.190.194.108:/{client_name}-odoo-17
-   cd /{client_name}-odoo-17
+   pscp -pw <ssh_password> <path_to_local_.deb_file> {user}@{ip}:{install_path}
    ```
-
-2. Place the Odoo Enterprise .deb file:
+   Place the Odoo Enterprise .deb file:
    ```bash
-   scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" user@195.190.194.108:/{client_name}-odoo-17
+   scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" {user}@{ip}:/{client_name}-odoo-17
    ```
-
-3. Run installation:
+2. Run installation:
    ```bash
    chmod +x install.sh && sudo -E ./install.sh
+3. Configure SSL (if needed):
+   ```bash
+   chmod +x ssl-setup.sh && sudo -E ./ssl-setup.sh
    ```
 </details>
 

@@ -110,15 +110,19 @@ The system uses a templating approach:
    python create_client_setup.py odoo-17-setup.conf
    ```
 3. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/
+   e.g. windows command to send the file through ssh with cmd:
+   ```bash
+   pscp -pw <ssh_password> <path_to_local_file> <user>@<ssh_ip>:<path_to_target_folder>
+   ```
 4. Run the installation script:
    ```bash
    cd <path_to_install>/{client_name}-odoo-17
-   ./install.sh
+   sudo chmod +x install.sh && sudo  -E ./install.sh
    ```
    This will automatically start Docker containers for a plug-and-play experience.
 5. Configure SSL (if needed):
    ```bash
-   ./ssl-setup.sh
+   chmod +x ssl-setup.sh && sudo -E ./ssl-setup.sh
    ```
 
 ## Backup and Restore

@@ -35,6 +35,7 @@ import glob
 import socket
 import configparser
 from pathlib import Path
+import getpass  # Add this import for username detection
 
 TEMPLATE_NAME = "{client_name}-odoo-17-setup"
 INSTALL_DIR_NAME = "{client_name}-odoo-17"
@@ -88,7 +89,7 @@ proxy_mode = True
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    'user': 'ubuntu',
+    'user': '',  # Empty default to trigger detection of current user
     'ip': '',  # No default IP - will be detected if blank
     'odoo_port': '8069',
     'db_port': '5432',
@@ -101,9 +102,9 @@ def print_usage():
     print("Usage: python3 create_client_setup.py <config_file>")
     print("Example: python3 create_client_setup.py odoo-17-setup.conf")
     print("\nConfig file format example:")
-    print("client_name=acme")
-    print("client_password=acme2025")
-    print("user=root")
+    print("client_name=test")
+    print("client_password=test2025")
+    print("user=")  # Empty user - will be auto-detected
     print("ip=localhost")  # Empty IP - will be auto-detected
     print("odoo_port=8069")
     print("db_port=5432")
@@ -145,6 +146,19 @@ def normalize_install_path(config):
     else:
         return os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
 
+def get_user_input(field_name, validation_func=None, error_message=None):
+    """Get and validate user input for a field"""
+    while True:
+        value = input(f"Enter {field_name}: ").strip()
+        if validation_func and not validation_func(value):
+            print(error_message)
+        else:
+            return value
+
+def validate_client_name(name):
+    """Validate that client name is alphanumeric"""
+    return name.isalnum()
+
 def load_config(config_file):
     """Load configuration from file with enhanced validation"""
     if not os.path.exists(config_file):
@@ -175,25 +189,50 @@ def load_config(config_file):
     for field in required_fields:
         if field not in config['DEFAULT'] or not config['DEFAULT'][field]:
             missing_fields.append(field)
+    
+    # Prompt for missing required fields
+    if 'client_name' in missing_fields:
+        print(f"client_name is missing in the config file: {config_file}")
+        result['client_name'] = get_user_input(
+            "client_name (alphanumeric characters only)",
+            validate_client_name,
+            "Error: client_name must contain only alphanumeric characters"
+        ).lower()
+    else:
+        client_name = config['DEFAULT']['client_name'].lower()
+        if not client_name.isalnum():
+            print("Error: client_name in config file must contain only alphanumeric characters")
+            result['client_name'] = get_user_input(
+                "Input config value for client_name (alphanumeric characters only): ",
+                validate_client_name,
+                "Error: client_name must contain only alphanumeric characters"
+            ).lower()
+        else:
+            result['client_name'] = client_name
 
-    if missing_fields:
-        print(f"Error: The following required fields are missing in the config file: {', '.join(missing_fields)}")
-        print(f"Tip: Edit {config_file} and add values for these fields")
-        sys.exit(1)
-
-    client_name = config['DEFAULT']['client_name'].lower()
-    if not client_name.isalnum():
-        print("Error: client_name must contain only alphanumeric characters")
-        print("Tip: Use letters and numbers only, no spaces or special characters")
-        sys.exit(1)
-    result['client_name'] = client_name
-
-    result['client_password'] = config['DEFAULT']['client_password']
+    if 'client_password' in missing_fields:
+        print(f"client_password is missing in the config file: {config_file}")
+        result['client_password'] = get_user_input(
+            "Input config value for client_password: "
+        )
+    else:
+        client_password = config['DEFAULT']['client_password']
+        result['client_password'] = client_password
 
     # Optional values with defaults
     for key in DEFAULT_CONFIG.keys():
         if key in config['DEFAULT'] and config['DEFAULT'][key]:
             result[key] = config['DEFAULT'][key]
+
+    # If user is empty, detect current user
+    if not result['user']:
+        try:
+            result['user'] = getpass.getuser()
+            print(f"Detected current user: {result['user']}")
+        except Exception as e:
+            print(f"Warning: Could not detect current user: {e}")
+            print("Using 'root' as fallback user")
+            result['user'] = 'root'
 
     # If IP is empty, determine it
     if not result['ip']:
@@ -221,12 +260,6 @@ def load_config(config_file):
     if not os.access(result['path_to_install'], os.W_OK):
         print(f"Error: No write permission to installation path: {result['path_to_install']}")
         print(f"Tip: Change directory permissions or specify a different path")
-        sys.exit(1)
-
-    # Validate password (at least 8 characters)
-    if len(result['client_password']) < 8:
-        print("Error: Password must be at least 8 characters long")
-        print("Tip: Choose a stronger password with at least 8 characters")
         sys.exit(1)
 
     for port_key in ['http_port', 'https_port', 'longpolling_port']:
@@ -342,23 +375,22 @@ def fix_readme_installation_steps(file_path, config):
     install_path = os.path.normpath(os.path.join(base_path, f"{client_name}-odoo-17"))
 
     # Create corrected installation steps
-    corrected_steps = f'''1. Clone this repository to `{install_path}`:
+    corrected_steps = f'''1. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/
+   e.g. windows command to send the file through ssh with cmd:
    ```bash
-   scp -r "<path to local install>/*" {user}@{ip}:{install_path}
-   cd {install_path}
+   pscp -pw <ssh_password> <path_to_local_.deb_file> {user}@{ip}:{install_path}
    ```
-
-2. Place the Odoo Enterprise .deb file:
+   Place the Odoo Enterprise .deb file:
    ```bash
-   scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" {user}@{ip}:{install_path}
+   scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" {user}@{ip}:/{client_name}-odoo-17
    ```'''
 
     # Find start of the clone section
-    clone_pattern = r'1\. Clone this repository to `.+`:'
+    clone_pattern = r'1\. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/:'
     if re.search(clone_pattern, content):
         # Replace the installation steps
         content = re.sub(
-            r'1\. Clone this repository to `.+`:\s+```bash[\s\S]+?cd [^\n]+\s+```\s+2\. Place the Odoo Enterprise \.deb file:\s+```bash[\s\S]+?```',
+            r'1\. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/:\s+```bash[\s\S]+?```',
             corrected_steps.replace('\\', r'\\'),  # Escape backslashes to avoid bad escape errors
             content,
             flags=re.DOTALL
@@ -443,11 +475,6 @@ def modify_file(file_path, config):
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
         content = file.read()
 
-    print(f"DEBUG: In file {file_path}")
-    print(f"DEBUG: Path to install value: {path_to_install}")
-    print(f"DEBUG: Number of {path_to_install} occurrences before replacement: {content.count(path_to_install)}")
-    print(f"DEBUG: Install path: {install_path}")
-
     # Apply client name replacements in different formats
     client_title = client_name.title()
 
@@ -478,17 +505,12 @@ def modify_file(file_path, config):
             if line.strip().startswith('INSTALL_DIR='):
                 original_line = line
                 lines[i] = f'INSTALL_DIR="{install_path}"'
-                print(f"DEBUG: Original INSTALL_DIR line: {original_line}")
-                print(f"DEBUG: New INSTALL_DIR line: {lines[i]}")
                 
                 if i+1 < len(lines) and 'sed' in lines[i+1] and 'INSTALL_DIR' in lines[i+1]:
-                    print(f"DEBUG: Found sed command that might modify INSTALL_DIR: {lines[i+1]}")
                     lines[i+1] = ''
                 break
         
         content = '\n'.join(lines)
-        
-        print(f"DEBUG: Skipping general path replacement for script file {file_path}")
     else:
         content = content.replace('{path_to_install}', path_to_install)
 
@@ -497,7 +519,6 @@ def modify_file(file_path, config):
         content = re.sub(r'DB_USER="odoo"', f'DB_USER="{config["db_user"]}"', content)
 
     occurrences = content.count(path_to_install)
-    print(f"DEBUG: Number of {path_to_install} occurrences after replacement: {occurrences}")
 
     if occurrences > 1:
         # Find the lines containing the duplicated path
@@ -515,16 +536,6 @@ def modify_file(file_path, config):
 
     print(f"Modified: {file_path}")
 
-    # Verify the final content in the file to catch any discrepancies
-    if file_path.endswith('install.sh'):
-        print("DEBUG: Final verification of install.sh file:")
-        with open(file_path, 'r', encoding='utf-8') as file:
-            install_content = file.read()
-            install_lines = install_content.split('\n')
-            for i, line in enumerate(install_lines):
-                if "INSTALL_DIR" in line:
-                    print(f"  Line {i+1}: {line}")
-
     # Special handling for specific files
     if file_path.endswith('README.md'):
         fix_readme_installation_steps(file_path, config)
@@ -541,8 +552,8 @@ def create_sample_config(filename):
 client_name=acme
 client_password=acme2025
 
-# Optional parameters (leave blank for defaults)
-user=root
+# Optional parameters (leave blank for auto-detection)
+user=
 ip=
 odoo_port=8069
 db_port=5432
@@ -585,7 +596,6 @@ def main():
         base_path = current_dir
 
     target_dir = normalize_install_path(config)
-    print(f"DEBUG: Installation directory: {target_dir}")
 
     # Check if target directory already exists
     if os.path.exists(target_dir):

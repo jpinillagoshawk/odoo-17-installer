@@ -237,41 +237,228 @@ validate_docker_volumes() {
     rmdir "$test_dir"
 }
 
-check_docker() {
-    log INFO "Checking Docker availability..."
+# Function to install Docker and Docker Compose
+install_docker() {
+    show_progress "Installing Docker"
+    log INFO "Installing Docker and Docker Compose..."
     
-    if ! command -v docker &>/dev/null; then
-        log ERROR "Docker is not installed"
-        echo -e "${RED}${BOLD}⚠ Docker is not installed${RESET}"
-        echo -e "${YELLOW}This installation requires Docker to run Odoo.${RESET}"
-        echo -e "${YELLOW}Solution: Install Docker using the official instructions:${RESET}"
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+        source /etc/os-release
+        OS_NAME="$ID"
+        OS_VERSION="$VERSION_ID"
+        OS_FAMILY="$ID_LIKE"
+        log INFO "Detected OS: $OS_NAME $OS_VERSION (family: $OS_FAMILY)"
+    else
+        log ERROR "Could not detect OS distribution"
+        echo -e "${RED}${BOLD}⚠ Could not detect OS distribution${RESET}"
+        echo -e "${YELLOW}Please install Docker manually following the official instructions:${RESET}"
         echo -e "${YELLOW}https://docs.docker.com/engine/install/${RESET}"
         exit 1
     fi
     
+    # Install Docker based on OS distribution
+    case "$OS_NAME" in
+        ubuntu|debian|linuxmint)
+            log INFO "Installing Docker on Debian/Ubuntu-based system"
+            echo -e "${CYAN}Installing Docker for $OS_NAME...${RESET}"
+            
+            # Update package lists
+            echo -e "${YELLOW}Updating package lists...${RESET}"
+            sudo apt-get update
+            
+            # Install prerequisites
+            echo -e "${YELLOW}Installing prerequisites...${RESET}"
+            sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common gnupg
+            
+            # Add Docker GPG key and repository
+            curl -fsSL https://download.docker.com/linux/$OS_NAME/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$OS_NAME $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+            # Update package lists again
+            sudo apt-get update
+            
+            # Install Docker
+            echo -e "${YELLOW}Installing Docker...${RESET}"
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+            
+            # Enable and start Docker service
+            sudo systemctl enable docker
+            sudo systemctl start docker
+            ;;
+            
+        centos|rhel|fedora|rocky|almalinux)
+            log INFO "Installing Docker on RHEL/CentOS-based system"
+            echo -e "${CYAN}Installing Docker for $OS_NAME...${RESET}"
+            
+            # Install prerequisites
+            sudo yum install -y yum-utils
+            
+            # Add Docker repository
+            sudo yum-config-manager --add-repo https://download.docker.com/linux/$OS_NAME/docker-ce.repo
+            
+            # Install Docker
+            echo -e "${YELLOW}Installing Docker...${RESET}"
+            sudo yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+            
+            # Enable and start Docker service
+            sudo systemctl enable docker
+            sudo systemctl start docker
+            ;;
+            
+        *)
+            log WARNING "Unsupported OS distribution: $OS_NAME"
+            echo -e "${YELLOW}${BOLD}⚠ Unsupported OS distribution: $OS_NAME${RESET}"
+            echo -e "${YELLOW}Would you like to try the generic Docker installation method?${RESET}"
+            
+            if confirm "Try generic Docker installation method?" "Y"; then
+                echo -e "${CYAN}Installing Docker using convenience script...${RESET}"
+                curl -fsSL https://get.docker.com -o get-docker.sh
+                sudo sh get-docker.sh
+                sudo systemctl enable docker
+                sudo systemctl start docker
+            else
+                echo -e "${RED}Docker installation skipped. Please install Docker manually.${RESET}"
+                echo -e "${YELLOW}https://docs.docker.com/engine/install/${RESET}"
+                exit 1
+            fi
+            ;;
+    esac
+    
+    # Install Docker Compose if needed
     if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
-        log ERROR "Docker Compose is not installed"
-        echo -e "${RED}${BOLD}⚠ Docker Compose is not installed${RESET}"
-        echo -e "${YELLOW}This installation requires Docker Compose to orchestrate containers.${RESET}"
-        echo -e "${YELLOW}Solution: Install Docker Compose using the official instructions:${RESET}"
-        echo -e "${YELLOW}https://docs.docker.com/compose/install/${RESET}"
+        log INFO "Installing Docker Compose"
+        echo -e "${CYAN}Installing Docker Compose...${RESET}"
+        
+        # Default to using Docker Compose Plugin
+        sudo apt-get install -y docker-compose-plugin || sudo yum install -y docker-compose-plugin || {
+            # Fallback to standalone Docker Compose
+            COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            sudo curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+        }
+    fi
+    
+    # Add user to docker group
+    if ! groups | grep -q docker; then
+        log INFO "Adding user to docker group"
+        echo -e "${YELLOW}Adding your user to the docker group...${RESET}"
+        sudo usermod -aG docker $USER
+        echo -e "${GREEN}User added to docker group.${RESET}"
+        echo -e "${YELLOW}Note: You may need to log out and log back in for the group changes to take effect.${RESET}"
+        echo -e "${YELLOW}For now, you may need to use 'sudo' with Docker commands.${RESET}"
+    fi
+    
+    # Verify installation
+    if command -v docker &>/dev/null; then
+        DOCKER_VERSION=$(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ',' || echo "Unknown")
+        log INFO "Docker installed successfully: $DOCKER_VERSION"
+        echo -e "${GREEN}${BOLD}✓${RESET} Docker installed successfully: $DOCKER_VERSION"
+    else
+        log ERROR "Docker installation failed"
+        echo -e "${RED}${BOLD}⚠ Docker installation failed${RESET}"
         exit 1
     fi
     
-    if ! docker info &>/dev/null; then
-        log ERROR "Docker daemon is not running"
-        echo -e "${RED}${BOLD}⚠ Docker daemon is not running${RESET}"
-        echo -e "${YELLOW}Solution: Start Docker service with:${RESET}"
-        echo -e "${YELLOW}sudo systemctl start docker${RESET}"
+    if command -v docker-compose &>/dev/null; then
+        COMPOSE_VERSION=$(docker-compose --version 2>/dev/null | cut -d' ' -f3 | tr -d ',' || echo "Unknown")
+        log INFO "Docker Compose installed successfully (standalone): $COMPOSE_VERSION"
+        echo -e "${GREEN}${BOLD}✓${RESET} Docker Compose installed successfully: $COMPOSE_VERSION"
+    elif docker compose version &>/dev/null; then
+        COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || echo "Unknown")
+        log INFO "Docker Compose installed successfully (plugin): $COMPOSE_VERSION"
+        echo -e "${GREEN}${BOLD}✓${RESET} Docker Compose installed successfully: $COMPOSE_VERSION"
+    else
+        log ERROR "Docker Compose installation failed"
+        echo -e "${RED}${BOLD}⚠ Docker Compose installation failed${RESET}"
         exit 1
+    fi
+    
+    echo -e "${GREEN}${BOLD}Docker and Docker Compose installed successfully!${RESET}"
+}
+
+check_docker() {
+    log INFO "Checking Docker availability..."
+    
+    if ! command -v docker &>/dev/null; then
+        log WARNING "Docker is not installed"
+        echo -e "${YELLOW}${BOLD}⚠ Docker is not installed${RESET}"
+        echo -e "${YELLOW}This installation requires Docker to run Odoo.${RESET}"
+        
+        if confirm "Would you like to install Docker now?" "Y"; then
+            install_docker
+        else
+            log ERROR "Docker installation declined by user"
+            echo -e "${RED}Installation cannot proceed without Docker. Exiting.${RESET}"
+            echo -e "${YELLOW}You can install Docker manually using:${RESET}"
+            echo -e "${YELLOW}https://docs.docker.com/engine/install/${RESET}"
+            exit 1
+        fi
+    fi
+    
+    if ! command -v docker-compose &>/dev/null && ! docker compose version &>/dev/null; then
+        log WARNING "Docker Compose is not installed"
+        echo -e "${YELLOW}${BOLD}⚠ Docker Compose is not installed${RESET}"
+        echo -e "${YELLOW}This installation requires Docker Compose to orchestrate containers.${RESET}"
+        
+        if confirm "Would you like to install Docker Compose now?" "Y"; then
+            # Call the install_docker function to install Docker Compose
+            install_docker
+        else
+            log ERROR "Docker Compose installation declined by user"
+            echo -e "${RED}Installation cannot proceed without Docker Compose. Exiting.${RESET}"
+            echo -e "${YELLOW}You can install Docker Compose manually using:${RESET}"
+            echo -e "${YELLOW}https://docs.docker.com/compose/install/${RESET}"
+            exit 1
+        fi
+    fi
+    
+    if ! docker info &>/dev/null; then
+        log WARNING "Docker daemon is not running"
+        echo -e "${YELLOW}${BOLD}⚠ Docker daemon is not running${RESET}"
+        
+        if confirm "Would you like to start the Docker service now?" "Y"; then
+            echo -e "${CYAN}Starting Docker service...${RESET}"
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            
+            # Wait for Docker to start
+            echo -e "${YELLOW}Waiting for Docker to start...${RESET}"
+            sleep 5
+            
+            if ! docker info &>/dev/null; then
+                log ERROR "Failed to start Docker daemon"
+                echo -e "${RED}${BOLD}⚠ Failed to start Docker daemon${RESET}"
+                echo -e "${YELLOW}Please start Docker manually:${RESET}"
+                echo -e "${YELLOW}sudo systemctl start docker${RESET}"
+                exit 1
+            else
+                log INFO "Docker daemon started successfully"
+                echo -e "${GREEN}${BOLD}✓${RESET} Docker daemon started successfully"
+            fi
+        else
+            log ERROR "Docker daemon start declined by user"
+            echo -e "${RED}Installation cannot proceed without Docker running. Exiting.${RESET}"
+            echo -e "${YELLOW}Start Docker manually with:${RESET}"
+            echo -e "${YELLOW}sudo systemctl start docker${RESET}"
+            exit 1
+        fi
     fi
     
     if ! docker ps &>/dev/null; then
         log WARNING "Current user may not have permission to run Docker"
         echo -e "${YELLOW}${BOLD}⚠ Current user may not have permission to run Docker${RESET}"
-        echo -e "${YELLOW}Solution: Add your user to the docker group:${RESET}"
-        echo -e "${YELLOW}sudo usermod -aG docker $USER${RESET}"
-        echo -e "${YELLOW}Then log out and log back in, or run this script with sudo${RESET}"
+        
+        if confirm "Would you like to add your user to the docker group?" "Y"; then
+            echo -e "${CYAN}Adding user to docker group...${RESET}"
+            sudo usermod -aG docker $USER
+            echo -e "${GREEN}User added to docker group.${RESET}"
+            echo -e "${YELLOW}Note: You may need to log out and log back in for this to take effect.${RESET}"
+            echo -e "${YELLOW}For now, the installation will continue with sudo.${RESET}"
+        else
+            echo -e "${YELLOW}Continuing without adding user to docker group.${RESET}"
+            echo -e "${YELLOW}You may need to use sudo for docker commands.${RESET}"
+        fi
     fi
     
     log INFO "Docker is available and running"
@@ -327,28 +514,24 @@ analyze_system() {
         DOCKER_VERSION=$(docker --version | cut -d' ' -f3 | tr -d ',')
         log INFO "Docker Version: $DOCKER_VERSION"
     else
+        # This section is now redundant because check_docker() will have installed Docker
+        # or exited if user declined installation
         DOCKER_VERSION="Not Installed"
-        log ERROR "Docker is not installed"
-        echo -e "${BG_RED}${WHITE}${BOLD} DOCKER NOT FOUND ${RESET}"
-        echo -e "${RED}Docker is required for this installation. Please install Docker first.${RESET}"
-        echo "Visit https://docs.docker.com/engine/install/ for installation instructions."
-        exit 1
+        log WARNING "Docker not detected (should have been installed by check_docker)"
     fi
 
     # Docker Compose Version
-    if command -v docker-compose >/dev/null 2>&1; then
+    if command -v docker-compose &>/dev/null; then
         DOCKER_COMPOSE_VERSION=$(docker-compose --version | cut -d' ' -f3 | tr -d ',')
         log INFO "Docker Compose Version: $DOCKER_COMPOSE_VERSION (standalone)"
-    elif docker compose version >/dev/null 2>&1; then
+    elif docker compose version &>/dev/null; then
         DOCKER_COMPOSE_VERSION=$(docker compose version --short)
         log INFO "Docker Compose Version: $DOCKER_COMPOSE_VERSION (plugin)"
     else
+        # This section is now redundant because check_docker() will have installed Docker Compose
+        # or exited if user declined installation
         DOCKER_COMPOSE_VERSION="Not Installed"
-        log ERROR "Docker Compose is not installed"
-        echo -e "${BG_RED}${WHITE}${BOLD} DOCKER COMPOSE NOT FOUND ${RESET}"
-        echo -e "${RED}Docker Compose is required for this installation. Please install Docker Compose first.${RESET}"
-        echo "Visit https://docs.docker.com/compose/install/ for installation instructions."
-        exit 1
+        log WARNING "Docker Compose not detected (should have been installed by check_docker)"
     fi
 
     # Check existing containers
