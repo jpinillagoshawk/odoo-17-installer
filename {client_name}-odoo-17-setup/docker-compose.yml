@@ -32,7 +32,6 @@ services:
     image: postgres:15
     container_name: db-{client_name}
     environment:
-      - POSTGRES_DB=postgres_{client_name}
       - POSTGRES_PASSWORD={client_password}
       - POSTGRES_USER=odoo
       - PGDATA=/var/lib/postgresql/data/pgdata

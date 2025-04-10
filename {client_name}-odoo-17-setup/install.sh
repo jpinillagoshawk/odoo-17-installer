@@ -953,37 +953,46 @@ initialize_database() {
             echo -e "${YELLOW}Database exists but is not initialized. Dropping and recreating...${RESET}"
             docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "DROP DATABASE $DB_NAME;"
         fi
+    else
+        log INFO "Database does not exist yet. Will create it."
+        echo -e "${CYAN}Database does not exist yet. Will create it.${RESET}"
     fi
 
-    # Method 1: Direct Odoo init command with timeout
-    log INFO "Trying direct initialization command..."
-    echo -e "${CYAN}Running initialization command directly...${RESET}"
+    # Create the database directly first - this avoids initialization when just creating the DB
+    log INFO "Creating empty database..."
+    docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" || true
     
-    # Create database if it doesn't exist
-    docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
+    # Method 1: Direct initialization using a separate process
+    log INFO "Initializing database with direct method..."
+    echo -e "${CYAN}Running initialization command...${RESET}"
     
-    # Stop Odoo container first
+    # Stop Odoo container
     cd "$INSTALL_DIR"
     docker compose stop web
     sleep 5
     
-    # Run Odoo init command directly with a timeout
-    log INFO "Running Odoo init command with timeout..."
-    echo -e "${YELLOW}This might take a minute or two...${RESET}"
+    # Add debug output
+    echo -e "${YELLOW}Starting initialization with timeout (120s)...${RESET}"
+    echo -e "${YELLOW}Network name being used: {client_name}-odoo-17_default${RESET}"
     
-    # Use timeout to prevent hanging
-    timeout 120s docker compose run --rm web --stop-after-init --init=base -d $DB_NAME
+    # Try direct initialization with timeout (without going through docker-compose)
+    timeout 120s docker run --rm --network={client_name}-odoo-17_default \
+        -v "$INSTALL_DIR/enterprise:/mnt/enterprise:ro" \
+        -v "$INSTALL_DIR/addons:/mnt/extra-addons:ro" \
+        odoo:17.0 --stop-after-init --init=base \
+        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    
     INIT_RESULT=$?
     
-    # Start web container
+    # Restart web container
     docker compose up -d web
     
-    # Check if initialization worked or if timeout occurred
+    # Check result
     if [ $INIT_RESULT -eq 124 ]; then
         log WARNING "Initialization command timed out but might still be working"
         echo -e "${YELLOW}Command timed out, but database might still be initializing properly${RESET}"
         echo -e "${YELLOW}Waiting a bit longer for initialization to complete...${RESET}"
-        sleep 20
+        sleep 30
     elif [ $INIT_RESULT -ne 0 ]; then
         log WARNING "Initialization command failed with exit code $INIT_RESULT"
         echo -e "${YELLOW}Initialization command failed, trying alternative methods...${RESET}"
@@ -1002,12 +1011,9 @@ initialize_database() {
     log INFO "Trying initialization through exec..."
     echo -e "${CYAN}Trying to initialize through existing container...${RESET}"
     
-    # Start web container if not running
-    if ! docker ps | grep -q "$CONTAINER_NAME"; then
-        log INFO "Starting Odoo container..."
-        docker compose up -d web
-        sleep 10
-    fi
+    # Ensure web container is running
+    docker compose up -d web
+    sleep 10
     
     # Try initialization through exec with --no-http
     docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME
@@ -1044,7 +1050,7 @@ initialize_database() {
         }' \
         http://localhost:8069/web/database/create > /dev/null
         
-    sleep 20
+    sleep 30
     
     # Check if initialization succeeded
     if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
@@ -1053,45 +1059,43 @@ initialize_database() {
         return 0
     fi
     
-    # Method 4: Full restart with a direct CLI command
-    log INFO "Trying complete restart with CLI initialization..."
-    echo -e "${CYAN}Performing complete restart with CLI initialization...${RESET}"
+    # Method 4: Full restart with everything fresh
+    log INFO "Trying complete restart with everything fresh..."
+    echo -e "${CYAN}Performing complete restart with clean volumes...${RESET}"
     
     # Stop everything
-    docker compose down
+    docker compose down -v  # Use -v to remove volumes
     sleep 5
     
     # Delete all PostgreSQL data to start fresh
     echo -e "${YELLOW}Clearing existing database data...${RESET}"
-    sudo rm -rf "$INSTALL_DIR/volumes/postgres-data/*" 2>/dev/null || true
+    rm -rf "$INSTALL_DIR/volumes/postgres-data/*" 2>/dev/null || true
     
     # Start database container
     docker compose up -d db
     sleep 15
     
-    # Run a simplified version of the initialization
-    echo -e "${YELLOW}Running database initialization command...${RESET}"
-    timeout 180s docker run --rm --network={client_name}-odoo-17_default \
-        -v "$INSTALL_DIR/enterprise:/mnt/enterprise:ro" \
-        -v "$INSTALL_DIR/addons:/mnt/extra-addons:ro" \
-        odoo:17.0 --stop-after-init --init=base \
-        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    # Create database explicitly
+    docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
     
-    # Start normal containers
-    docker compose up -d
+    # Start web container
+    docker compose up -d web
+    sleep 10
+    
+    # Run initialization command
+    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME
     
     # Final verification
-    sleep 10
+    sleep 15
     if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
         log ERROR "Database initialization failed after all attempts"
         echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
         echo -e "${YELLOW}Try these manual steps:${RESET}"
-        echo -e "${YELLOW}1. Stop all containers: cd $INSTALL_DIR && docker compose down${RESET}"
-        echo -e "${YELLOW}2. Remove volumes: sudo rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
-        echo -e "${YELLOW}3. Start database: docker compose up -d db${RESET}"
+        echo -e "${YELLOW}1. Stop all containers: cd $INSTALL_DIR && docker compose down -v${RESET}"
+        echo -e "${YELLOW}2. Remove volumes: rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
+        echo -e "${YELLOW}3. Start fresh: docker compose up -d${RESET}"
         echo -e "${YELLOW}4. Wait 10 seconds${RESET}"
-        echo -e "${YELLOW}5. Initialize: docker run --rm --network={client_name}-odoo-17_default odoo:17.0 --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS${RESET}"
-        echo -e "${YELLOW}6. Start normally: docker compose up -d${RESET}"
+        echo -e "${YELLOW}5. Initialize: docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME${RESET}"
         return 1
     fi
 
