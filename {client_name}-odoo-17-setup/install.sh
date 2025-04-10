@@ -1626,7 +1626,7 @@ ensure_enterprise_modules() {
                                 echo -e "${YELLOW}Copy attempt $copy_attempt failed, waiting for container...${RESET}"
                                 wait_for_container $CONTAINER_NAME 10 3
                                 copy_attempt=$((copy_attempt + 1))
-                            }
+                            fi
                         done
                         
                         if [ "$copy_success" = false ]; then
@@ -1690,7 +1690,7 @@ limit_time_cpu = 600
 limit_time_real = 1200
 proxy_mode = True
 EOF'
-                    }
+                    fi
                 else
                     # Create odoo.conf directly in container if not found on host
                     docker exec $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
