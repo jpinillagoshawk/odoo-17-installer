@@ -1247,11 +1247,18 @@ initialize_database() {
     INFO "Initializing Odoo database using temporary container..."
     echo -e "${CYAN}Initializing database with temporary container...${RESET}"
     
-    # Generate a unique name for the temporary container
-    TEMP_CONTAINER="odoo-init-$(date +%s)"
+    # Generate a unique name for the temporary container using a more reliable method
+    TEMP_CONTAINER="odoo-init-$(date +%Y%m%d%H%M%S)"
     
-    # Make sure enterprise and addons directories exist
-    mkdir -p "$PWD/enterprise" "$PWD/addons"
+    # Make sure no container with the same name exists (cleanup any possible leftovers)
+    echo -e "${YELLOW}Cleaning up any existing temporary containers...${RESET}"
+    docker rm -f "$TEMP_CONTAINER" >/dev/null 2>&1 || true
+    
+    # Also check for any other odoo-init containers and clean them up
+    for container in $(docker ps -a --format "{{.Names}}" | grep "odoo-init-" 2>/dev/null || true); do
+        echo -e "${YELLOW}Removing old initialization container: $container${RESET}"
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    done
     
     # Display the command we're going to run
     echo -e "${YELLOW}Running temporary container with command:${RESET}"
@@ -1275,9 +1282,9 @@ initialize_database() {
         }
     fi
     
-    # Make sure permissions are correct for volume mounts
-    echo -e "${YELLOW}Making sure permissions are correct for volume mounts...${RESET}"
+    # Make sure enterprise and addons directories exist
     mkdir -p "$PWD/enterprise" "$PWD/addons"
+    
     chmod -R 755 "$PWD/enterprise" "$PWD/addons" 2>/dev/null || true
     
     # Print volume information
@@ -1286,13 +1293,55 @@ initialize_database() {
     echo -e "Addons dir: $PWD/addons ($(ls -la "$PWD/addons" | wc -l) items)"
     
     echo -e "${YELLOW}Running temporary Odoo container to initialize database...${RESET}"
-    # Use a wrapper script with timeout to prevent hanging indefinitely
-    (
-        # Set a timeout of 180 seconds (3 minutes)
-        TIMEOUT=180
-        echo -e "${YELLOW}Setting timeout of $TIMEOUT seconds for initialization...${RESET}"
+    
+    # Create a simple timeout function using the timeout command if available
+    # Otherwise, just run the command directly
+    if command -v timeout >/dev/null 2>&1; then
+        echo -e "${YELLOW}Using timeout command with 300 seconds limit${RESET}"
         
-        # Run the command and capture PID
+        # Run with timeout
+        timeout 300 docker run --rm \
+            --name "$TEMP_CONTAINER" \
+            --network="$DOCKER_NETWORK" \
+            -v "$PWD/enterprise:/mnt/enterprise:z" \
+            -v "$PWD/addons:/mnt/extra-addons:z" \
+            -e "DB_HOST=db" \
+            -e "DB_PORT=5432" \
+            -e "DB_USER=$DB_USER" \
+            -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
+            -e "LANG=C.UTF-8" \
+            -e "TZ=UTC" \
+            "$ODOO_IMAGE" \
+            -- \
+            --stop-after-init \
+            --init=base,web \
+            --load-language=en_US \
+            --without-demo=all \
+            --log-level=info \
+            -d "$DB_NAME" \
+            --db_host=db \
+            --db_port=5432 \
+            --db_user="$DB_USER" \
+            --db_password="$DB_WORKING_PASSWORD" > /tmp/odoo_init.log 2>&1
+        
+        INIT_STATUS=$?
+        
+        # Check for timeout
+        if [ $INIT_STATUS -eq 124 ]; then
+            echo -e "${RED}Initialization timed out after 300 seconds${RESET}"
+            cat /tmp/odoo_init.log
+            docker kill "$TEMP_CONTAINER" >/dev/null 2>&1 || true
+        elif [ $INIT_STATUS -ne 0 ]; then
+            echo -e "${RED}Initialization failed with status code $INIT_STATUS${RESET}"
+            cat /tmp/odoo_init.log
+        else
+            echo -e "${GREEN}Initialization completed successfully${RESET}"
+            cat /tmp/odoo_init.log
+        fi
+    else
+        echo -e "${YELLOW}Timeout command not available, running without timeout protection${RESET}"
+        
+        # Direct run without timeout
         docker run --rm \
             --name "$TEMP_CONTAINER" \
             --network="$DOCKER_NETWORK" \
@@ -1315,47 +1364,10 @@ initialize_database() {
             --db_host=db \
             --db_port=5432 \
             --db_user="$DB_USER" \
-            --db_password="$DB_WORKING_PASSWORD" > /tmp/odoo_init_output.log 2>&1 &
+            --db_password="$DB_WORKING_PASSWORD"
         
-        PID=$!
-        
-        # Display status spinner while waiting
-        ELAPSED=0
-        while [ $ELAPSED -lt $TIMEOUT ]; do
-            if ! kill -0 $PID 2>/dev/null; then
-                # Process has finished
-                wait $PID
-                INIT_STATUS=$?
-                cat /tmp/odoo_init_output.log
-                rm -f /tmp/odoo_init_output.log
-                exit $INIT_STATUS
-            fi
-            
-            # Print spinner
-            SPINNER_CHAR=$(echo -e "⠋\n⠙\n⠹\n⠸\n⠼\n⠴\n⠦\n⠧\n⠇\n⠏" | sed -n "$((ELAPSED % 10 + 1))p")
-            echo -ne "${YELLOW}Initializing database... $SPINNER_CHAR Elapsed: ${ELAPSED}s${RESET}\r"
-            
-            sleep 1
-            ELAPSED=$((ELAPSED + 1))
-        done
-        
-        # If we get here, the timeout was reached
-        echo -e "\n${RED}Timeout reached after $TIMEOUT seconds. Aborting initialization.${RESET}"
-        docker kill "$TEMP_CONTAINER" 2>/dev/null || true
-        echo -e "${YELLOW}Checking for container logs before killing...${RESET}"
-        docker logs "$TEMP_CONTAINER" 2>/dev/null || echo "No logs available"
-        
-        # Capture any output that was generated
-        if [ -f /tmp/odoo_init_output.log ]; then
-            echo -e "${YELLOW}Output captured so far:${RESET}"
-            cat /tmp/odoo_init_output.log
-            rm -f /tmp/odoo_init_output.log
-        fi
-        
-        exit 1
-    )
-    
-    INIT_STATUS=$?
+        INIT_STATUS=$?
+    fi
     
     if [ $INIT_STATUS -ne 0 ]; then
         ERROR "Database initialization failed with exit code $INIT_STATUS"
