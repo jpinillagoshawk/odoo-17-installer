@@ -947,67 +947,106 @@ initialize_database() {
             log INFO "Database is already initialized"
             echo -e "${GREEN}${BOLD}✓${RESET} Database is already initialized"
             return 0
+        else
+            # Database exists but is not initialized - we should drop it and recreate
+            log WARNING "Database exists but is not initialized. Dropping and recreating..."
+            echo -e "${YELLOW}Database exists but is not initialized. Dropping and recreating...${RESET}"
+            docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "DROP DATABASE $DB_NAME;"
         fi
     fi
 
-    # Explicitly initialize the database using Odoo command line
-    log INFO "Initializing database using Odoo command line..."
-    echo -e "${CYAN}Initializing database with Odoo base module...${RESET}"
+    # Method 1: Create a fresh database using a temporary container
+    log INFO "Initializing fresh database using separate container..."
+    echo -e "${CYAN}Creating database using dedicated container...${RESET}"
+    
+    # Stop the Odoo container first to avoid conflicts
+    docker stop $CONTAINER_NAME
+    
+    # Run a temporary Odoo container to initialize the database with better options
+    docker run --rm --name temp-odoo-init \
+        --link $DB_CONTAINER:db \
+        -v "$INSTALL_DIR/enterprise:/mnt/enterprise" \
+        -v "$INSTALL_DIR/addons:/mnt/extra-addons" \
+        odoo:17.0 --stop-after-init --init=base,web,mail \
+        -d $DB_NAME \
+        --db_host=db --db_port=5432 --db_user=$DB_USER --db_password=$DB_PASS \
+        --without-demo=all
+    
+    # Restart the original container
+    docker start $CONTAINER_NAME
+    
+    # Check if initialization succeeded
+    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" | grep -q "1"; then
+        log INFO "Database initialized successfully with dedicated container"
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+        return 0
+    fi
+
+    # Method 2: Try using --no-http to avoid port conflicts
+    log INFO "Trying initialization with --no-http..."
+    echo -e "${CYAN}Trying initialization with --no-http parameter...${RESET}"
     
     # Use --no-http to avoid port conflicts with already running Odoo
-    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base,web,mail -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS --without-demo=all
     
-    if [ $? -ne 0 ]; then
-        # Try stopping Odoo first, then initializing
-        log WARNING "Command line initialization failed, trying with container restart..."
-        echo -e "${YELLOW}Command line initialization failed, trying with container restart...${RESET}"
-        
-        # Stop Odoo container
-        docker stop $CONTAINER_NAME
-        
-        # Start Odoo with initialization parameters
-        docker run --rm --link $DB_CONTAINER:db \
-            -v "$INSTALL_DIR/config:/etc/odoo" \
-            -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
-            -v "$INSTALL_DIR/enterprise:/mnt/enterprise" \
-            -v "$INSTALL_DIR/addons:/mnt/extra-addons" \
-            -v "$INSTALL_DIR/logs:/var/log/odoo" \
-            odoo:17.0 --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
-        
-        # Restart the original container
-        docker start $CONTAINER_NAME
-        
-        if [ $? -ne 0 ]; then
-            # Try alternative approach with database creation API
-            log WARNING "Container restart approach failed, trying API method..."
-            echo -e "${YELLOW}Container restart approach failed, trying alternative approach...${RESET}"
-            
-            # Create the first database using Odoo's API
-            echo -e "${CYAN}Creating initial database via API...${RESET}"
-            curl -s -X POST \
-                -H "Content-Type: application/json" \
-                -d '{
-                    "jsonrpc": "2.0",
-                    "method": "call",
-                    "params": {
-                        "master_pwd": "'$ADMIN_PASS'",
-                        "name": "'$DB_NAME'",
-                        "login": "admin",
-                        "password": "'$ADMIN_PASS'",
-                        "lang": "en_US",
-                        "country_code": "es"
-                    }
-                }' \
-                http://localhost:8069/web/database/create > /dev/null
-        fi
+    # Check if initialization succeeded
+    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" | grep -q "1"; then
+        log INFO "Database initialized successfully with --no-http method"
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+        return 0
     fi
 
-    # Verify initialization
+    # Method 3: Try the database manager creation API
+    log INFO "Trying initialization via web API..."
+    echo -e "${CYAN}Creating database via web API...${RESET}"
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d '{
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "master_pwd": "'$ADMIN_PASS'",
+                "name": "'$DB_NAME'",
+                "login": "admin",
+                "password": "'$ADMIN_PASS'",
+                "lang": "en_US",
+                "country_code": "es"
+            }
+        }' \
+        http://localhost:8069/web/database/create > /dev/null
+        
+    sleep 15
+    
+    # Method 4: Completely restart both containers
     if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
-        log ERROR "Database initialization failed"
-        echo -e "${RED}${BOLD}⚠ Database initialization failed${RESET}"
-        echo -e "${YELLOW}You can try manual initialization with:${RESET}"
-        echo -e "${YELLOW}docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME${RESET}"
+        log WARNING "Previous methods failed, trying with complete container restart..."
+        echo -e "${YELLOW}Previous methods failed, trying with complete container restart...${RESET}"
+        
+        # Stop and remove both containers
+        docker stop $CONTAINER_NAME $DB_CONTAINER
+        docker rm $CONTAINER_NAME $DB_CONTAINER
+        
+        # Start containers from scratch
+        cd "$INSTALL_DIR"
+        docker-compose up -d db
+        sleep 10
+        
+        # Initialize database with new container
+        docker-compose run --rm web --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS --without-demo=all
+        
+        # Start the web container normally
+        docker-compose up -d web
+    fi
+
+    # Final verification
+    if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
+        log ERROR "Database initialization failed after all attempts"
+        echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
+        echo -e "${YELLOW}Try these manual steps:${RESET}"
+        echo -e "${YELLOW}1. Stop all containers: cd $INSTALL_DIR && docker-compose down${RESET}"
+        echo -e "${YELLOW}2. Remove volumes: rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
+        echo -e "${YELLOW}3. Restart and initialize: docker-compose up -d db && sleep 10 && docker-compose run --rm web --stop-after-init --init=base -d $DB_NAME${RESET}"
+        echo -e "${YELLOW}4. Start normally: docker-compose up -d${RESET}"
         return 1
     fi
 
