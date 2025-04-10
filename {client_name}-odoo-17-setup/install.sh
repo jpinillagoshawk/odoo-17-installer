@@ -1555,24 +1555,97 @@ ensure_enterprise_modules() {
         # If host has files but container doesn't, it's a mount issue
         if [ "$host_files" -gt 5 ]; then
             log WARNING "Detected mount issue: host directory has files but container doesn't see them"
-            echo -e "${YELLOW}${BOLD}⚠ Detected mount issue! Copying files directly to container...${RESET}"
+            echo -e "${YELLOW}${BOLD}⚠ Detected volume mount issue! Trying alternative approaches...${RESET}"
             
-            for file in "$INSTALL_DIR/enterprise/"*; do
-                if [ -d "$file" ]; then
-                    docker cp "$file" "$CONTAINER_NAME:/mnt/enterprise/$(basename "$file")"
-                    echo -e "${YELLOW}Copied $(basename "$file") to container${RESET}"
+            # First, check if the volume is read-only
+            echo -e "${CYAN}Checking if volume is read-only...${RESET}"
+            if docker exec $CONTAINER_NAME touch /mnt/enterprise/test_write 2>/dev/null; then
+                docker exec $CONTAINER_NAME rm /mnt/enterprise/test_write
+                
+                # Volume is writable, can copy files directly
+                echo -e "${GREEN}Volume is writable, copying files directly...${RESET}"
+                
+                # Try to copy directly using docker cp
+                for file in "$INSTALL_DIR/enterprise/"*/; do
+                    if [ -d "$file" ]; then
+                        module_name=$(basename "$file")
+                        echo -e "${YELLOW}Copying $module_name module...${RESET}"
+                        docker cp "$file" "$CONTAINER_NAME:/mnt/enterprise/"
+                    fi
+                done
+                
+                # Verify success
+                enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
+                if [ "$enterprise_files" -lt 5 ]; then
+                    log ERROR "Failed to copy enterprise modules to container"
+                    echo -e "${RED}${BOLD}⚠ Direct copy failed, trying restart approach...${RESET}"
+                else
+                    log INFO "Successfully copied files to container"
+                    echo -e "${GREEN}Successfully copied files to container (found $enterprise_files files)${RESET}"
                 fi
-            done
-            
-            # Verify files were copied
-            enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
-            if [ "$enterprise_files" -lt 5 ]; then
-                log ERROR "Files still not available in container after direct copy"
-                echo -e "${RED}${BOLD}⚠ Files still missing in container after direct copy!${RESET}"
             else
-                log INFO "Successfully copied $enterprise_files files to container"
-                echo -e "${GREEN}Successfully copied $enterprise_files files to container${RESET}"
+                # Volume is read-only, need to modify and restart
+                log WARNING "Enterprise volume is mounted as read-only"
+                echo -e "${YELLOW}${BOLD}⚠ Enterprise volume is mounted as read-only!${RESET}"
+                echo -e "${YELLOW}This prevents direct copying of files. Modifying docker-compose.yml...${RESET}"
+                
+                # Check if we need to update docker-compose.yml to fix the mount
+                if grep -q ":/mnt/enterprise:ro" "$INSTALL_DIR/docker-compose.yml"; then
+                    echo -e "${CYAN}Detected read-only flag in docker-compose.yml, removing it...${RESET}"
+                    sed -i 's|./enterprise:/mnt/enterprise:ro|./enterprise:/mnt/enterprise|g' "$INSTALL_DIR/docker-compose.yml"
+                    
+                    echo -e "${YELLOW}Updated docker-compose.yml. Restarting containers...${RESET}"
+                    cd "$INSTALL_DIR"
+                    docker compose down
+                    docker compose up -d
+                    
+                    # Wait for containers to start
+                    echo -e "${YELLOW}Waiting for containers to restart...${RESET}"
+                    sleep 15
+                    
+                    # Verify fix
+                    enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
+                    if [ "$enterprise_files" -lt 5 ]; then
+                        log ERROR "Still facing enterprise mount issues after restart"
+                        echo -e "${RED}${BOLD}⚠ Enterprise module mount issue persists after restart!${RESET}"
+                        echo -e "${RED}Manual intervention may be needed to resolve this issue.${RESET}"
+                    else
+                        log INFO "Enterprise module access fixed after restart"
+                        echo -e "${GREEN}${BOLD}✓${RESET} Enterprise modules accessible after container restart!"
+                    fi
+                else
+                    # Volume mount issue but no read-only flag
+                    log ERROR "Mount issue with no read-only flag"
+                    echo -e "${RED}${BOLD}⚠ Mount issue detected but the volume is not marked as read-only.${RESET}"
+                    echo -e "${RED}This suggests a more complex issue with Docker volume mounting.${RESET}"
+                    
+                    echo -e "${YELLOW}Trying container restart to fix the issue...${RESET}"
+                    cd "$INSTALL_DIR"
+                    docker compose down
+                    docker compose up -d
+                    
+                    # Wait for containers to start
+                    echo -e "${YELLOW}Waiting for containers to restart...${RESET}"
+                    sleep 15
+                    
+                    # Check if restart fixed the issue
+                    enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
+                    if [ "$enterprise_files" -lt 5 ]; then
+                        log ERROR "Still facing enterprise mount issues after restart"
+                        echo -e "${RED}${BOLD}⚠ Mount issues persist after restart. Consider rebuilding with:${RESET}"
+                        echo -e "${RED}cd $INSTALL_DIR && docker compose down -v && docker compose up -d${RESET}"
+                    else
+                        log INFO "Enterprise module access fixed after restart"
+                        echo -e "${GREEN}${BOLD}✓${RESET} Enterprise modules accessible after container restart!"
+                    fi
+                fi
             fi
+        else
+            # Neither host nor container has files
+            log ERROR "Few enterprise files in both host and container directories"
+            echo -e "${RED}${BOLD}⚠ Enterprise files missing on both host and container!${RESET}"
+            echo -e "${YELLOW}This suggests the enterprise modules were not extracted properly.${RESET}"
+            echo -e "${YELLOW}Rerun the installation with a valid Odoo Enterprise .deb file.${RESET}"
         fi
     else
         log INFO "Enterprise directory contains $enterprise_files files/directories"

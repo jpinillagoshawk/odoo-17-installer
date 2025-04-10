@@ -10,8 +10,8 @@ services:
     volumes:
       - ./config:/etc/odoo
       - ./volumes/odoo-data:/var/lib/odoo
-      - ./enterprise:/mnt/enterprise:ro
-      - ./addons:/mnt/extra-addons:ro
+      - ./enterprise:/mnt/enterprise
+      - ./addons:/mnt/extra-addons
       - ./logs:/var/log/odoo
       - ./filestore:/var/lib/odoo/filestore
     environment:
