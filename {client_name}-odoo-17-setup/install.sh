@@ -1585,7 +1585,8 @@ ensure_enterprise_modules() {
         
         # Wait for containers to fully start
         echo -e "${YELLOW}Waiting for containers to initialize...${RESET}"
-        sleep 20
+        wait_for_container $CONTAINER_NAME 20 3
+        wait_for_container $DB_CONTAINER 10 2
         
         # Verify if mount issues are fixed
         enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
@@ -1600,14 +1601,37 @@ ensure_enterprise_modules() {
                 echo -e "${CYAN}Copying enterprise modules directly into container...${RESET}"
                 
                 # Create the enterprise directory in container if it doesn't exist
-                docker exec $CONTAINER_NAME mkdir -p /mnt/enterprise
+                docker exec $CONTAINER_NAME mkdir -p /mnt/enterprise || {
+                    echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
+                    wait_for_container $CONTAINER_NAME 20 3
+                    docker exec $CONTAINER_NAME mkdir -p /mnt/enterprise
+                }
                 
-                # Copy all enterprise modules
+                # Copy all enterprise modules with retry
                 for dir in "$INSTALL_DIR/enterprise/"*/; do
                     if [ -d "$dir" ]; then
                         module_name=$(basename "$dir")
                         echo -e "${YELLOW}Copying $module_name module...${RESET}"
-                        docker cp "$dir" "$CONTAINER_NAME:/mnt/enterprise/"
+                        
+                        # Try to copy with retry logic
+                        local max_copy_attempts=3
+                        local copy_attempt=1
+                        local copy_success=false
+                        
+                        while [ $copy_attempt -le $max_copy_attempts ] && [ "$copy_success" = false ]; do
+                            if docker cp "$dir" "$CONTAINER_NAME:/mnt/enterprise/" 2>/dev/null; then
+                                copy_success=true
+                                echo -e "${GREEN}Successfully copied $module_name${RESET}"
+                            else
+                                echo -e "${YELLOW}Copy attempt $copy_attempt failed, waiting for container...${RESET}"
+                                wait_for_container $CONTAINER_NAME 10 3
+                                copy_attempt=$((copy_attempt + 1))
+                            }
+                        done
+                        
+                        if [ "$copy_success" = false ]; then
+                            echo -e "${RED}Failed to copy $module_name after $max_copy_attempts attempts${RESET}"
+                        fi
                     fi
                 done
             fi
@@ -1617,11 +1641,56 @@ ensure_enterprise_modules() {
                 echo -e "${CYAN}Copying odoo.conf directly into container...${RESET}"
                 
                 # Create the config directory in container if it doesn't exist
-                docker exec $CONTAINER_NAME mkdir -p /etc/odoo
+                docker exec $CONTAINER_NAME mkdir -p /etc/odoo || {
+                    echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
+                    wait_for_container $CONTAINER_NAME 20 3
+                    docker exec $CONTAINER_NAME mkdir -p /etc/odoo
+                }
                 
                 # Check if host has odoo.conf and copy it
                 if [ -f "$INSTALL_DIR/config/odoo.conf" ]; then
-                    docker cp "$INSTALL_DIR/config/odoo.conf" "$CONTAINER_NAME:/etc/odoo/odoo.conf"
+                    # Try to copy with retry logic
+                    local max_conf_attempts=3
+                    local conf_attempt=1
+                    local conf_success=false
+                    
+                    while [ $conf_attempt -le $max_conf_attempts ] && [ "$conf_success" = false ]; do
+                        if docker cp "$INSTALL_DIR/config/odoo.conf" "$CONTAINER_NAME:/etc/odoo/odoo.conf" 2>/dev/null; then
+                            conf_success=true
+                            echo -e "${GREEN}Successfully copied odoo.conf${RESET}"
+                        else
+                            echo -e "${YELLOW}Copy attempt $conf_attempt failed, waiting for container...${RESET}"
+                            wait_for_container $CONTAINER_NAME 10 3
+                            conf_attempt=$((conf_attempt + 1))
+                        fi
+                    done
+                    
+                    if [ "$conf_success" = false ]; then
+                        echo -e "${RED}Failed to copy odoo.conf after $max_conf_attempts attempts${RESET}"
+                        echo -e "${YELLOW}Creating odoo.conf directly in container...${RESET}"
+                        
+                        # Last resort - create config directly in container
+                        docker exec $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
+[options]
+admin_passwd = {client_password}
+db_host = db
+db_port = {db_port}
+db_user = odoo
+db_password = {client_password}
+addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+data_dir = /var/lib/odoo
+logfile = /var/log/odoo/odoo.log
+log_level = info
+max_cron_threads = 2
+workers = 4
+limit_memory_hard = 2684354560
+limit_memory_soft = 2147483648
+limit_request = 8192
+limit_time_cpu = 600
+limit_time_real = 1200
+proxy_mode = True
+EOF'
+                    }
                 else
                     # Create odoo.conf directly in container if not found on host
                     docker exec $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
@@ -1654,7 +1723,8 @@ EOF'
             # Restart Odoo service to apply all changes
             echo -e "${CYAN}Restarting Odoo service to apply changes...${RESET}"
             docker compose restart web
-            sleep 15
+            echo -e "${YELLOW}Waiting for Odoo container to restart...${RESET}"
+            wait_for_container $CONTAINER_NAME 20 3
             
             # Final verification
             enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
@@ -1720,6 +1790,37 @@ data_dir = /var/lib/odoo" > /etc/odoo/odoo.conf
     log INFO "Enterprise module configuration complete"
     echo -e "${GREEN}${BOLD}✓${RESET} Enterprise modules configured successfully"
     echo -e "${YELLOW}Note: You may need to go to Apps menu and click 'Update Apps List' to see all enterprise modules${RESET}"
+}
+
+# Add this function near the top of the file, after other function definitions
+wait_for_container() {
+    local container_name=$1
+    local max_attempts=$2
+    local wait_seconds=$3
+    local attempt=1
+    
+    echo -e "${YELLOW}Waiting for container $container_name to be ready...${RESET}"
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo -ne "${YELLOW}Attempt $attempt/$max_attempts${RESET}\r"
+        
+        # Check if container is running (not restarting, not created, not exited)
+        local status=$(docker inspect --format='{{.State.Status}}' $container_name 2>/dev/null || echo "not_found")
+        
+        if [ "$status" = "running" ]; then
+            # Double check with a simple command execution
+            if docker exec $container_name echo "Container is responsive" >/dev/null 2>&1; then
+                echo -e "\n${GREEN}Container $container_name is ready!${RESET}"
+                return 0
+            fi
+        fi
+        
+        sleep $wait_seconds
+        attempt=$((attempt + 1))
+    done
+    
+    echo -e "\n${RED}${BOLD}⚠ Container $container_name failed to become ready after $max_attempts attempts${RESET}"
+    return 1
 }
 
 # Main execution
