@@ -1122,48 +1122,64 @@ initialize_database() {
     
     # Verify the postgres user exists and has required permissions
     INFO "Verifying database user access..."
-    if ! docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1;" >/dev/null 2>&1; then
-        ERROR "Cannot connect to PostgreSQL with 'postgres' user. Check if the user exists and has proper permissions."
-        echo -e "${RED}PostgreSQL connection failed with user 'postgres'. Trying to troubleshoot...${RESET}"
+    if ! docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1;" >/dev/null 2>&1; then
+        WARNING "Cannot connect directly as 'postgres' user. This is uncommon but not fatal."
+        echo -e "${YELLOW}Could not connect as PostgreSQL 'postgres' user. Checking available users...${RESET}"
         
-        # List PostgreSQL users for diagnostic purposes
+        # List PostgreSQL users for diagnostic purposes - try different approaches
+        USERS_OUTPUT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT usename,usesuper FROM pg_user;" 2>/dev/null || echo "Failed to list users")
         echo -e "${YELLOW}Available PostgreSQL users:${RESET}"
-        docker exec "$DB_CONTAINER" psql -c "SELECT usename FROM pg_user;" || true
+        echo "$USERS_OUTPUT"
         
-        # Try with the odoo user if postgres fails
-        echo -e "${YELLOW}Trying with 'odoo' user instead...${RESET}"
-        if docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1;" >/dev/null 2>&1; then
-            WARNING "Connected with 'odoo' user, but this user may not have appropriate permissions to create databases."
-            echo -e "${YELLOW}Will try to continue with 'odoo' user, but may encounter permission issues.${RESET}"
-            # Continue with the odoo user
-            DB_ADMIN_USER="$DB_USER"
-        else
-            ERROR "Cannot connect to PostgreSQL with either 'postgres' or 'odoo' user."
-            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-            return 1
-        fi
+        # Try with the odoo user as the database superuser
+        echo -e "${YELLOW}Will continue with '$DB_USER' as the database administrator...${RESET}"
+        DB_ADMIN_USER="$DB_USER"
     else
+        INFO "Successfully connected as PostgreSQL 'postgres' user"
         DB_ADMIN_USER="postgres"
     fi
     
     # Terminate existing connections to allow dropping the database
     INFO "Terminating existing connections to database..."
-    docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
+    if [ "$DB_ADMIN_USER" = "postgres" ]; then
+        docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
+    else
+        docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
+    fi
     
     # Drop existing database if it exists
     INFO "Dropping existing database if it exists..."
-    if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1; then
+    if [ "$DB_ADMIN_USER" = "postgres" ]; then
+        DROP_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+    else
+        DROP_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+    fi
+    
+    if ! echo "$DROP_RESULT" | grep -q "DROP DATABASE"; then
         WARNING "Could not drop existing database, it may not exist or might be in use."
+        echo -e "${YELLOW}Drop database result: $DROP_RESULT${RESET}"
         echo -e "${YELLOW}Failed to drop database. Trying with force disconnect of all connections...${RESET}"
         
         # Force disconnect all connections more aggressively
-        docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "
-            UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
-            SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
-        " 2>&1 || true
+        if [ "$DB_ADMIN_USER" = "postgres" ]; then
+            docker exec -u postgres "$DB_CONTAINER" psql -c "
+                UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
+                SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
+            " 2>&1 || true
+            
+            # Try dropping again
+            DROP_RESULT2=$(docker exec -u postgres "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+        else
+            docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "
+                UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
+                SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
+            " 2>&1 || true
+            
+            # Try dropping again
+            DROP_RESULT2=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+        fi
         
-        # Try dropping again
-        if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1; then
+        if ! echo "$DROP_RESULT2" | grep -q "DROP DATABASE"; then
             WARNING "Still could not drop database after aggressive termination. Will try to continue."
         else
             INFO "Successfully dropped database after aggressive connection termination."
@@ -1172,12 +1188,24 @@ initialize_database() {
     
     # Create fresh database
     INFO "Creating new database $DB_NAME with owner $DB_USER..."
-    if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1; then
-        ERROR "Failed to create new database $DB_NAME."
+    if [ "$DB_ADMIN_USER" = "postgres" ]; then
+        CREATE_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
+    else
+        CREATE_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "CREATE DATABASE $DB_NAME;" 2>&1)
+    fi
+    
+    if ! echo "$CREATE_RESULT" | grep -q "CREATE DATABASE"; then
+        ERROR "Failed to create new database $DB_NAME. Result: $CREATE_RESULT"
         echo -e "${RED}Failed to create database. Checking if database already exists...${RESET}"
         
         # Check if database already exists
-        if docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1 | grep -q "1 row"; then
+        if [ "$DB_ADMIN_USER" = "postgres" ]; then
+            EXISTS_RESULT=$(docker exec -u postgres "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1)
+        else
+            EXISTS_RESULT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1)
+        fi
+        
+        if echo "$EXISTS_RESULT" | grep -q "1 row"; then
             WARNING "Database $DB_NAME already exists. Will try to continue with existing database."
         else
             ERROR "Cannot create database and it doesn't exist. Cannot continue."
@@ -1231,21 +1259,40 @@ initialize_database() {
     echo -e "odoo --stop-after-init --init=base,web ... -d $DB_NAME --db_host=db --db_user=$DB_USER"
     
     # Run temporary container with proper mounts and network
+    echo -e "${YELLOW}Making sure permissions are correct for volume mounts...${RESET}"
+    mkdir -p "$PWD/enterprise" "$PWD/addons"
+    chmod -R 755 "$PWD/enterprise" "$PWD/addons" 2>/dev/null || true
+    
+    echo -e "${YELLOW}Running temporary container with the following parameters:${RESET}"
+    echo -e "Network: $DOCKER_NETWORK"
+    echo -e "Database: $DB_NAME"
+    echo -e "Database User: $DB_USER"
+    echo -e "Volume mounts: enterprise and addons directories"
+    
+    # For debugging - verify volume paths
+    echo -e "${YELLOW}Volume paths:${RESET}"
+    echo -e "Enterprise dir: $PWD/enterprise ($(ls -la "$PWD/enterprise" | wc -l) items)"
+    echo -e "Addons dir: $PWD/addons ($(ls -la "$PWD/addons" | wc -l) items)"
+    
+    # Run the container with detailed logging and better error handling
     INIT_OUTPUT=$(docker run --rm \
         --name "$TEMP_CONTAINER" \
         --network="$DOCKER_NETWORK" \
-        -v "$PWD/enterprise:/mnt/enterprise" \
-        -v "$PWD/addons:/mnt/extra-addons" \
+        -v "$PWD/enterprise:/mnt/enterprise:z" \
+        -v "$PWD/addons:/mnt/extra-addons:z" \
         -e "DB_HOST=db" \
         -e "DB_PORT=5432" \
         -e "DB_USER=$DB_USER" \
         -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
+        -e "LANG=C.UTF-8" \
+        -e "TZ=UTC" \
         "$ODOO_IMAGE" \
         -- \
         --stop-after-init \
         --init=base,web \
         --load-language=en_US \
         --without-demo=all \
+        --log-level=info \
         -d "$DB_NAME" \
         --db_host=db \
         --db_port=5432 \
