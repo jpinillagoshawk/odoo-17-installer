@@ -937,18 +937,21 @@ initialize_database() {
     echo -e "${YELLOW}Waiting for services to start...${RESET}"
     sleep 10
 
+    # Get the actual PostgreSQL password from the running container
+    ACTUAL_DB_PASS=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "{client_password}")
+    
     # Create connection string for easier reuse and set password environment
     PG_CONN_STRING="-h db -U $DB_USER -p 5432"
-    export PGPASSWORD="{client_password}"
+    export PGPASSWORD="$ACTUAL_DB_PASS"
     log INFO "Using database connection: $PG_CONN_STRING (user=$DB_USER, db=$DB_NAME)"
 
     # Check if database already exists
-    if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -lqt | grep -q $DB_NAME; then
+    if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -lqt | grep -q $DB_NAME; then
         log INFO "Database $DB_NAME already exists"
         echo -e "${YELLOW}Database $DB_NAME already exists. Checking if it's initialized...${RESET}"
         
         # Check if it's initialized (has ir_module_module table)
-        if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'ir_module_module'" | grep -q "1"; then
+        if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'ir_module_module'" | grep -q "1"; then
             log INFO "Database is already initialized"
             echo -e "${GREEN}${BOLD}✓${RESET} Database is already initialized"
             return 0
@@ -956,7 +959,7 @@ initialize_database() {
             # Database exists but is not initialized - we should drop it and recreate
             log WARNING "Database exists but is not initialized. Dropping and recreating..."
             echo -e "${YELLOW}Database exists but is not initialized. Dropping and recreating...${RESET}"
-            docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE $DB_NAME;"
+            docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "DROP DATABASE $DB_NAME;"
         fi
     else
         log INFO "Database does not exist yet. Will create it."
@@ -965,11 +968,15 @@ initialize_database() {
 
     # Create the database directly first - this avoids initialization when just creating the DB
     log INFO "Creating empty database..."
-    docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" || true
+    docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" || true
     
     # Method 1: Direct initialization using a separate process
     log INFO "Initializing database with direct method..."
     echo -e "${CYAN}Running initialization command...${RESET}"
+    
+    # Capture the actual password from docker-compose.yml before stopping the container
+    ACTUAL_DB_PASS=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "{client_password}")
+    log INFO "Retrieved database password from running container"
     
     # Stop Odoo container
     cd "$INSTALL_DIR"
@@ -978,15 +985,15 @@ initialize_database() {
     
     # Add debug output
     echo -e "${YELLOW}Starting initialization with timeout (120s)...${RESET}"
-    echo -e "${YELLOW}Database connection parameters: db_host=db, db_user=$DB_USER, password=$DB_PASS${RESET}"
+    echo -e "${YELLOW}Database connection parameters: db_host=db, db_user=$DB_USER${RESET}"
     
     # Create correct network parameter - ensure proper network name
-    # First try exact network name format with quotes to prevent grep errors 
-    NETWORK_NAME=$(docker network ls | grep -F "{client_name}-odoo-17_default" | awk '{print $2}')
+    # Get actual network name from running container
+    NETWORK_NAME=$(docker inspect $DB_CONTAINER --format '{{range $net,$v := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null)
     
-    # If not found, try alternative pattern
+    # If not found, try using pattern matching
     if [ -z "$NETWORK_NAME" ]; then
-        NETWORK_NAME=$(docker network ls | grep -E "{client_name}.*default" | awk '{print $2}' | head -1)
+        NETWORK_NAME=$(docker network ls | grep -F "{client_name}" | awk '{print $2}' | head -1)
     fi
     
     # Last resort fallback
@@ -997,14 +1004,13 @@ initialize_database() {
     log INFO "Using network: $NETWORK_NAME"
     
     # Try direct initialization with timeout (without going through docker-compose)
-    # Properly quote passwords and explicitly set PGPASSWORD env var
-    # Note: Keep {client_password} as-is for template substitution
+    # Use ACTUAL_DB_PASS to ensure consistency with docker-compose environment
     timeout 120s docker run --rm --network=$NETWORK_NAME \
         -v "$INSTALL_DIR/enterprise:/mnt/enterprise:ro" \
         -v "$INSTALL_DIR/addons:/mnt/extra-addons:ro" \
-        -e PGPASSWORD="{client_password}" \
+        -e PGPASSWORD="$ACTUAL_DB_PASS" \
         odoo:17.0 --stop-after-init --init=base \
-        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="{client_password}"
+        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$ACTUAL_DB_PASS"
     
     INIT_RESULT=$?
     
@@ -1025,7 +1031,7 @@ initialize_database() {
     fi
     
     # Check if initialization succeeded regardless of command result
-    if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+    if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
         log INFO "Database initialized successfully"
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
         return 0
@@ -1040,10 +1046,10 @@ initialize_database() {
     sleep 10
     
     # Try initialization through exec with --no-http
-    docker exec -e PGPASSWORD="{client_password}" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="{client_password}"
+    docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$ACTUAL_DB_PASS"
     
     # Check if initialization succeeded
-    if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+    if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
         log INFO "Database initialized successfully via exec method"
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
         return 0
@@ -1064,10 +1070,10 @@ initialize_database() {
             "jsonrpc": "2.0",
             "method": "call",
             "params": {
-                "master_pwd": "{client_password}",
+                "master_pwd": "$ACTUAL_DB_PASS",
                 "name": "'$DB_NAME'",
                 "login": "admin",
-                "password": "{client_password}",
+                "password": "$ACTUAL_DB_PASS",
                 "lang": "en_US",
                 "country_code": "es"
             }
@@ -1077,7 +1083,7 @@ initialize_database() {
     sleep 30
     
     # Check if initialization succeeded
-    if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+    if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
         log INFO "Database initialized successfully via API method"
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
         return 0
@@ -1100,18 +1106,18 @@ initialize_database() {
     sleep 15
     
     # Create database explicitly
-    docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+    docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
     
     # Start web container
     docker compose up -d web
     sleep 10
     
     # Run initialization command
-    docker exec -e PGPASSWORD="{client_password}" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="{client_password}"
+    docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$ACTUAL_DB_PASS"
     
     # Final verification
     sleep 15
-    if ! docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
+    if ! docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
         log ERROR "Database initialization failed after all attempts"
         echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
         echo -e "${YELLOW}Try these manual steps:${RESET}"
@@ -1119,7 +1125,7 @@ initialize_database() {
         echo -e "${YELLOW}2. Remove volumes: rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
         echo -e "${YELLOW}3. Start fresh: docker compose up -d${RESET}"
         echo -e "${YELLOW}4. Wait 10 seconds${RESET}"
-        echo -e "${YELLOW}5. Initialize: docker exec -e PGPASSWORD=\\\"{client_password}\\\" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=\\\"{client_password}\\\"${RESET}"
+        echo -e "${YELLOW}5. Initialize: docker exec -e PGPASSWORD=\\\"$ACTUAL_DB_PASS\\\" $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=\\\"$ACTUAL_DB_PASS\\\"${RESET}"
         return 1
     fi
 
@@ -1135,6 +1141,9 @@ check_service_health() {
     log INFO "Checking service health..."
     echo -e "${CYAN}Checking if Odoo services are running properly...${RESET}"
 
+    # Get the actual PostgreSQL password from the running container
+    local ACTUAL_DB_PASS=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "{client_password}")
+
     local max_attempts=30
     local attempt=1
 
@@ -1142,7 +1151,7 @@ check_service_health() {
         echo -ne "${YELLOW}Checking services ($attempt/$max_attempts)...${RESET}\r"
 
         # Check if database is accessible
-        if docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT 1" >/dev/null 2>&1; then
+        if docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT 1" >/dev/null 2>&1; then
             # Check if Odoo web interface is responding
             if curl -s http://localhost:8069/web/database/selector > /dev/null; then
                 echo -e "\n${GREEN}${BOLD}✓${RESET} ${GREEN}Odoo is fully operational${RESET}"
@@ -1169,7 +1178,7 @@ verify_installation() {
 
     # Check database existence and content
     echo -ne "${YELLOW}Checking database...${RESET}\r"
-    local db_check=$(docker exec -e PGPASSWORD="{client_password}" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null)
+    local db_check=$(docker exec -e PGPASSWORD="$ACTUAL_DB_PASS" $DB_CONTAINER psql $PG_CONN_STRING -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null)
 
     if [ $? -ne 0 ] || [ -z "$db_check" ]; then
         log ERROR "Database verification failed"
@@ -1233,6 +1242,10 @@ start_containers() {
 
 # Show completion message
 show_completion() {
+    # Get the actual PostgreSQL password from the running container for display
+    FINAL_DB_PASS=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "{client_password}")
+    ADMIN_PASSWORD=$FINAL_DB_PASS
+    
     echo -e "\n${BG_GREEN}${WHITE}${BOLD} INSTALLATION COMPLETE ${RESET}\n"
     echo -e "${GREEN}${BOLD}Odoo 17 has been successfully installed for {client_name}!${RESET}"
     echo -e "${CYAN}${BOLD}You can access Odoo at:${RESET}"
@@ -1248,8 +1261,8 @@ show_completion() {
 
     echo -e "\n${CYAN}${BOLD}Login Credentials:${RESET}"
     echo -e "  ${BOLD}Username:${RESET} admin"
-    echo -e "  ${BOLD}Password:${RESET} {client_password}"
-    echo -e "  ${BOLD}Master Password:${RESET} {client_password}"
+    echo -e "  ${BOLD}Password:${RESET} $ADMIN_PASSWORD"
+    echo -e "  ${BOLD}Master Password:${RESET} $ADMIN_PASSWORD"
 
     echo -e "\n${CYAN}${BOLD}Installation Directory:${RESET} $INSTALL_DIR"
     echo -e "${CYAN}${BOLD}Log File:${RESET} $LOG_FILE"
