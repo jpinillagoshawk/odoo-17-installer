@@ -1294,80 +1294,128 @@ initialize_database() {
     
     echo -e "${YELLOW}Running temporary Odoo container to initialize database...${RESET}"
     
-    # Create a simple timeout function using the timeout command if available
-    # Otherwise, just run the command directly
-    if command -v timeout >/dev/null 2>&1; then
-        echo -e "${YELLOW}Using timeout command with 300 seconds limit${RESET}"
+    # Temporarily disable exit on error to prevent script termination
+    set +e
+    
+    echo -e "${YELLOW}Running direct container command (this may take a few minutes)...${RESET}"
+    
+    # Run the container directly with output to console 
+    echo -e "${GREEN}Starting initialization process...${RESET}"
+    
+    # Debug - print exact command to be executed
+    DEBUG_CMD="docker run --rm \\
+        --name \"$TEMP_CONTAINER\" \\
+        --network=\"$DOCKER_NETWORK\" \\
+        -v \"$PWD/enterprise:/mnt/enterprise:z\" \\
+        -v \"$PWD/addons:/mnt/extra-addons:z\" \\
+        -e \"DB_HOST=db\" \\
+        -e \"DB_PORT=5432\" \\
+        -e \"DB_USER=$DB_USER\" \\
+        -e \"DB_PASSWORD=$DB_WORKING_PASSWORD\" \\
+        -e \"LANG=C.UTF-8\" \\
+        -e \"TZ=UTC\" \\
+        \"$ODOO_IMAGE\" \\
+        -- \\
+        --stop-after-init \\
+        --init=base,web \\
+        --load-language=en_US \\
+        --without-demo=all \\
+        --log-level=info \\
+        -d \"$DB_NAME\" \\
+        --db_host=db \\
+        --db_port=5432 \\
+        --db_user=\"$DB_USER\" \\
+        --db_password=\"$DB_WORKING_PASSWORD\""
+    
+    echo -e "${YELLOW}Debug - Full command:${RESET}\n$DEBUG_CMD"
+    
+    # Use tee to capture output while also displaying it in real-time
+    echo -e "${YELLOW}Executing docker command with output capture...${RESET}"
+    
+    # Create timestamp for tracking execution time
+    START_TIME=$(date +%s)
+    
+    # Log file for capturing all output
+    LOG_FILE="/tmp/odoo_init_output.log"
+    
+    echo "-------------- $(date) --------------" > "$LOG_FILE"
+    echo "Starting initialization with container: $TEMP_CONTAINER" >> "$LOG_FILE"
+    echo "Database: $DB_NAME on host: db" >> "$LOG_FILE"
+    echo "Network: $DOCKER_NETWORK" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
+    
+    # Run with timeout to prevent hanging indefinitely (30 minutes)
+    timeout 1800 docker run --rm \
+        --name "$TEMP_CONTAINER" \
+        --network="$DOCKER_NETWORK" \
+        -v "$PWD/enterprise:/mnt/enterprise:z" \
+        -v "$PWD/addons:/mnt/extra-addons:z" \
+        -e "DB_HOST=db" \
+        -e "DB_PORT=5432" \
+        -e "DB_USER=$DB_USER" \
+        -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
+        -e "LANG=C.UTF-8" \
+        -e "TZ=UTC" \
+        "$ODOO_IMAGE" \
+        -- \
+        --stop-after-init \
+        --init=base,web \
+        --load-language=en_US \
+        --without-demo=all \
+        --log-level=info \
+        -d "$DB_NAME" \
+        --db_host=db \
+        --db_port=5432 \
+        --db_user="$DB_USER" \
+        --db_password="$DB_WORKING_PASSWORD" 2>&1 | tee -a "$LOG_FILE"
         
-        # Run with timeout
-        timeout 300 docker run --rm \
-            --name "$TEMP_CONTAINER" \
-            --network="$DOCKER_NETWORK" \
-            -v "$PWD/enterprise:/mnt/enterprise:z" \
-            -v "$PWD/addons:/mnt/extra-addons:z" \
-            -e "DB_HOST=db" \
-            -e "DB_PORT=5432" \
-            -e "DB_USER=$DB_USER" \
-            -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
-            -e "LANG=C.UTF-8" \
-            -e "TZ=UTC" \
-            "$ODOO_IMAGE" \
-            -- \
-            --stop-after-init \
-            --init=base,web \
-            --load-language=en_US \
-            --without-demo=all \
-            --log-level=info \
-            -d "$DB_NAME" \
-            --db_host=db \
-            --db_port=5432 \
-            --db_user="$DB_USER" \
-            --db_password="$DB_WORKING_PASSWORD" > /tmp/odoo_init.log 2>&1
-        
-        INIT_STATUS=$?
-        
-        # Check for timeout
-        if [ $INIT_STATUS -eq 124 ]; then
-            echo -e "${RED}Initialization timed out after 300 seconds${RESET}"
-            cat /tmp/odoo_init.log
-            docker kill "$TEMP_CONTAINER" >/dev/null 2>&1 || true
-        elif [ $INIT_STATUS -ne 0 ]; then
-            echo -e "${RED}Initialization failed with status code $INIT_STATUS${RESET}"
-            cat /tmp/odoo_init.log
-        else
-            echo -e "${GREEN}Initialization completed successfully${RESET}"
-            cat /tmp/odoo_init.log
-        fi
-    else
-        echo -e "${YELLOW}Timeout command not available, running without timeout protection${RESET}"
-        
-        # Direct run without timeout
-        docker run --rm \
-            --name "$TEMP_CONTAINER" \
-            --network="$DOCKER_NETWORK" \
-            -v "$PWD/enterprise:/mnt/enterprise:z" \
-            -v "$PWD/addons:/mnt/extra-addons:z" \
-            -e "DB_HOST=db" \
-            -e "DB_PORT=5432" \
-            -e "DB_USER=$DB_USER" \
-            -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
-            -e "LANG=C.UTF-8" \
-            -e "TZ=UTC" \
-            "$ODOO_IMAGE" \
-            -- \
-            --stop-after-init \
-            --init=base,web \
-            --load-language=en_US \
-            --without-demo=all \
-            --log-level=info \
-            -d "$DB_NAME" \
-            --db_host=db \
-            --db_port=5432 \
-            --db_user="$DB_USER" \
-            --db_password="$DB_WORKING_PASSWORD"
-        
-        INIT_STATUS=$?
+    INIT_STATUS=${PIPESTATUS[0]}
+    END_TIME=$(date +%s)
+    DURATION=$((END_TIME - START_TIME))
+    
+    echo -e "${YELLOW}Docker command completed with status: $INIT_STATUS (took ${DURATION}s)${RESET}"
+    echo "" >> "$LOG_FILE"
+    echo "Command completed with status: $INIT_STATUS (execution time: ${DURATION}s)" >> "$LOG_FILE"
+    
+    # Check if timeout was reached
+    if [ $INIT_STATUS -eq 124 ]; then
+        echo -e "${RED}TIMEOUT REACHED: Command exceeded the 30-minute limit${RESET}"
+        echo "TIMEOUT REACHED: Command exceeded the 30-minute limit" >> "$LOG_FILE"
     fi
+    
+    # Check if container is still running (should not be with --rm, but check anyway)
+    if docker ps -a | grep -q "$TEMP_CONTAINER"; then
+        echo -e "${RED}WARNING: Container $TEMP_CONTAINER is still present despite --rm flag${RESET}"
+        echo "Container state:" >> "$LOG_FILE"
+        docker inspect "$TEMP_CONTAINER" >> "$LOG_FILE" 2>&1 || echo "Failed to inspect container" >> "$LOG_FILE"
+        echo -e "${YELLOW}Attempting to force remove the container...${RESET}"
+        docker rm -f "$TEMP_CONTAINER" >> "$LOG_FILE" 2>&1 || echo "Failed to remove container" >> "$LOG_FILE"
+    fi
+    
+    # If we captured output, display the last few lines for debugging
+    if [ -f "$LOG_FILE" ]; then
+        echo -e "${YELLOW}Last 30 lines of output:${RESET}"
+        tail -n 30 "$LOG_FILE"
+        
+        # Search for specific error patterns
+        echo -e "${YELLOW}Checking for common errors in the log:${RESET}"
+        if grep -q "connection refused" "$LOG_FILE"; then
+            echo -e "${RED}ERROR: Database connection refused. Check if PostgreSQL is running and accessible.${RESET}"
+        fi
+        if grep -q "password authentication failed" "$LOG_FILE"; then
+            echo -e "${RED}ERROR: Database password authentication failed. Check credentials.${RESET}"
+        fi
+        if grep -q "could not connect to server" "$LOG_FILE"; then
+            echo -e "${RED}ERROR: Could not connect to database server. Network issue or incorrect hostname.${RESET}"
+        fi
+        
+        echo -e "${YELLOW}Full log available at: $LOG_FILE${RESET}"
+    fi
+    
+    # Re-enable exit on error
+    set -e
+    
+    echo -e "${YELLOW}Container finished with status: $INIT_STATUS${RESET}"
     
     if [ $INIT_STATUS -ne 0 ]; then
         ERROR "Database initialization failed with exit code $INIT_STATUS"
