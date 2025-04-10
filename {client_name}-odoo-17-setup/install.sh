@@ -992,12 +992,18 @@ setup_ssl_config() {
 
     log INFO "Setting up SSL configuration files..."
 
-    # Define current directory
+    # Define the parent directory where ssl-config template is stored
+    local PARENT_DIR=$(dirname "$PWD")
     local CURRENT_DIR=$(pwd)
     local ssl_files=("ssl-config.conf.template" "SSL-README.md" "direct-ssl-config.conf" "ssl-setup.sh")
     
     for file in "${ssl_files[@]}"; do
-        if [ -f "$CURRENT_DIR/$file" ]; then
+        # First check if file exists in parent directory
+        if [ -f "$PARENT_DIR/$file" ]; then
+            # Copy from parent directory
+            cp "$PARENT_DIR/$file" "$INSTALL_DIR/$file"
+            log INFO "Copied $file from parent directory to installation directory"
+        elif [ -f "$CURRENT_DIR/$file" ]; then
             # Check if source and destination are the same file
             if [ "$(realpath "$CURRENT_DIR/$file")" != "$(realpath "$INSTALL_DIR/$file")" ]; then
                 cp "$CURRENT_DIR/$file" "$INSTALL_DIR/$file"
@@ -1005,13 +1011,13 @@ setup_ssl_config() {
             else
                 log INFO "Skipped copying $file (source and destination are the same)"
             fi
-            
-            # Make executable if it's a script
-            if [[ "$file" == *.sh ]]; then
-                chmod +x "$INSTALL_DIR/$file"
-            fi
         else
-            log INFO "$file not found in current directory, skipping"
+            log INFO "$file not found in parent or current directory, skipping"
+        fi
+        
+        # Make executable if it's a script
+        if [[ "$file" == *.sh ]]; then
+            chmod +x "$INSTALL_DIR/$file"
         fi
     done
 
@@ -1091,11 +1097,15 @@ initialize_database() {
     DEBUG "Using Docker network: $DOCKER_NETWORK"
     
     # Securely determine database password
-    DB_WORKING_PASSWORD=$(docker inspect "$DB_CONTAINER" --format '{{range .Config.Env}}{{if (hasPrefix "POSTGRES_PASSWORD=" .)}}{{trimPrefix "POSTGRES_PASSWORD=" .}}{{end}}{{end}}')
+    DB_WORKING_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
     if [ -z "$DB_WORKING_PASSWORD" ]; then
-        ERROR "Could not determine database password from container environment."
-        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        return 1
+        # Fallback to container inspection and grep if printenv doesn't work
+        DB_WORKING_PASSWORD=$(docker inspect "$DB_CONTAINER" --format '{{range .Config.Env}}{{.}}{{"\n"}}{{end}}' | grep "^POSTGRES_PASSWORD=" | cut -d= -f2)
+        if [ -z "$DB_WORKING_PASSWORD" ]; then
+            ERROR "Could not determine database password from container environment."
+            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            return 1
+        fi
     fi
     DEBUG "Successfully retrieved database password for initialization"
     
