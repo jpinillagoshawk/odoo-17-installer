@@ -1014,60 +1014,25 @@ initialize_database() {
     log INFO "DEBUG: DB_PASS value length: ${#DB_PASS} characters"
     log INFO "DEBUG: Using DB_USER=$DB_USER and DB_NAME=$DB_NAME"
     
-    # Check what PostgreSQL actually shows for authentication
-    docker exec $DB_CONTAINER cat /var/lib/postgresql/data/pg_hba.conf | grep -A 5 "local connections" >> "$LOG_FILE" 2>&1 || true
-    
     # Verify the actual docker-compose environment
-    echo -e "${YELLOW}Verifying docker-compose environment variables:${RESET}"
-    docker exec $DB_CONTAINER printenv | grep -E 'POSTGRES_|DB_' | grep -v PASSWORD >> "$LOG_FILE" 2>&1 || true
+    echo -e "${YELLOW}Verifying docker compose environment...${RESET}"
     
-    # Stop Odoo container
+    # IMPORTANT: Don't stop the web container - use it directly!
+    log INFO "Using existing Odoo container for initialization"
+    echo -e "${YELLOW}Using existing Odoo container for initialization...${RESET}"
+    
+    # Start web container if it's not running
     cd "$INSTALL_DIR"
-    docker compose stop web
+    docker compose up -d web
     sleep 5
     
-    # Add debug output
-    echo -e "${YELLOW}Starting initialization with timeout (120s)...${RESET}"
-    
-    # Test direct connection to verify the password is correct before running initialization
-    log INFO "Testing direct PostgreSQL connection..."
-    docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql -h localhost -U $DB_USER -p 5432 -c "SELECT 1" >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        log INFO "Direct PostgreSQL connection successful with current password"
-    else
-        log WARNING "Direct PostgreSQL connection failed - password authentication issue"
-        # Try to show what's in the PostgreSQL logs
-        docker logs $DB_CONTAINER | grep -E "auth|password" | tail -10 >> "$LOG_FILE" 2>&1 || true
-    fi
-    
-    # Create correct network parameter - ensure proper network name
-    NETWORK_NAME=$(docker network ls | grep "${client_name}-odoo-17_default" | awk '{print $2}' || echo "")
-    
-    # If not found, try other pattern matching strategies
-    if [ -z "$NETWORK_NAME" ]; then
-        NETWORK_NAME=$(docker network ls | grep "${client_name}" | grep default | awk '{print $2}' | head -1 || echo "")
-    fi
-    
-    # Last resort fallback
-    if [ -z "$NETWORK_NAME" ]; then
-        NETWORK_NAME="${client_name}-odoo-17_default"
-    fi
-    
-    log INFO "Using network: $NETWORK_NAME with DB_PASS (DO NOT LOG PASSWORD VALUES)"
-    
-    # Try direct initialization with timeout
-    log INFO "Running Odoo initialization with DB_PASS"
-    timeout 120s docker run --rm --network=$NETWORK_NAME \
-        -v "$INSTALL_DIR/enterprise:/mnt/enterprise:ro" \
-        -v "$INSTALL_DIR/addons:/mnt/extra-addons:ro" \
-        -e PGPASSWORD="$pg_password" \
-        odoo:17.0 --stop-after-init --init=base \
+    # Run initialization directly on the existing container
+    # This uses the same network and authentication context as the docker-compose setup
+    log INFO "Running Odoo initialization directly in the container"
+    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base \
         -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password="$pg_password"
     
     INIT_RESULT=$?
-    
-    # Restart web container
-    docker compose up -d web
     
     # Check result
     if [ $INIT_RESULT -eq 124 ]; then
