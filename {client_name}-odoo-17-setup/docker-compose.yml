@@ -10,8 +10,8 @@ services:
     volumes:
       - ./config:/etc/odoo
       - ./volumes/odoo-data:/var/lib/odoo
-      - ./enterprise:/mnt/enterprise
-      - ./addons:/mnt/extra-addons
+      - ./enterprise:/mnt/enterprise:ro
+      - ./addons:/mnt/extra-addons:ro
       - ./logs:/var/log/odoo
       - ./filestore:/var/lib/odoo/filestore
     environment:
@@ -20,7 +20,7 @@ services:
       - USER=odoo
       - PASSWORD={client_password}
       - PROXY_MODE=True
-    command: --db_host=db --db_user=odoo --db_password={client_password}
+    command: --db_host=db --db_user=odoo --db_password={client_password} --addons-path=/mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
     logging:
       driver: "json-file"
       options:

@@ -846,12 +846,60 @@ extract_enterprise() {
         fi
     fi
 
+    # Try multiple known paths where enterprise modules might be found
+    local found=false
+    local enterprise_paths=(
+        "$temp_dir/usr/lib/python3/dist-packages/odoo/addons"
+        "$temp_dir/opt/odoo/addons"
+        "$temp_dir/usr/lib/python3/dist-packages/odoo/addons_enterprise"
+    )
+    
+    for path in "${enterprise_paths[@]}"; do
+        if [ -d "$path" ]; then
+            # Check if it contains enterprise modules by looking for key modules
+            if [ -d "$path/web_enterprise" ] || [ -d "$path/account_accountant" ]; then
+                log INFO "Found enterprise modules at: $path"
+                echo -e "${GREEN}Found enterprise modules at: $path${RESET}"
+                
+                # Copy all modules
+                cp -R "$path/"* "$INSTALL_DIR/enterprise/"
+                found=true
+                break
+            fi
+        fi
+    done
+    
+    # If not found in standard locations, search for them
+    if [ "$found" = false ]; then
+        log INFO "Searching for enterprise modules in package..."
+        echo -e "${YELLOW}Enterprise modules not found in standard locations. Searching...${RESET}"
+        
+        # Find common enterprise modules
+        local module_paths=$(find "$temp_dir" -type d -name "web_enterprise" -o -name "account_accountant" -o -name "helpdesk" 2>/dev/null)
+        
+        if [ -n "$module_paths" ]; then
+            # Get first result
+            local first_path=$(echo "$module_paths" | head -n 1)
+            # Get parent directory
+            local parent_dir=$(dirname "$first_path")
+            
+            log INFO "Found enterprise modules at: $parent_dir"
+            echo -e "${GREEN}Found enterprise modules at: $parent_dir${RESET}"
+            
+            # Copy all modules from parent directory
+            cp -R "$parent_dir/"* "$INSTALL_DIR/enterprise/"
+            found=true
+        fi
+    fi
+    
+    # Clean up
+    rm -rf "$temp_dir"
+    
     # Validate extraction
-    if [ ! -d "$temp_dir/usr/lib/python3/dist-packages/odoo/addons" ]; then
-        log ERROR "Failed to extract enterprise addons: Invalid package structure"
-        echo -e "${RED}${BOLD}⚠ Failed to extract enterprise addons: Invalid package structure${RESET}"
-        rm -rf "$temp_dir"
-
+    if [ "$found" = false ] || [ ! "$(ls -A "$INSTALL_DIR/enterprise/" 2>/dev/null)" ]; then
+        log ERROR "Failed to find enterprise modules in package"
+        echo -e "${RED}${BOLD}⚠ Failed to find enterprise modules in package${RESET}"
+        
         if confirm "Do you want to continue without enterprise addons?"; then
             log INFO "Continuing without enterprise addons"
             echo -e "${YELLOW}Continuing without enterprise addons. Community version will be used.${RESET}"
@@ -863,11 +911,6 @@ extract_enterprise() {
         fi
     fi
 
-    # Move enterprise addons
-    mv "$temp_dir/usr/lib/python3/dist-packages/odoo/addons/"* "$INSTALL_DIR/enterprise/"
-    rm -rf "$temp_dir"
-
-    # Validate move
     validate "Enterprise addons availability" "[ -n '$(ls -A $INSTALL_DIR/enterprise/)' ]" "Enterprise addons directory is empty"
     log INFO "Enterprise addons extracted successfully"
     echo -e "${GREEN}${BOLD}✓${RESET} Enterprise addons extracted successfully"
@@ -1499,18 +1542,55 @@ ensure_enterprise_modules() {
     
     # Verify enterprise directory has content
     log INFO "Checking enterprise directory content"
-    local enterprise_files=$(docker exec $CONTAINER_NAME ls -1 /mnt/enterprise | wc -l)
+    local enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
     
     if [ "$enterprise_files" -lt 5 ]; then
         log WARNING "Few files found in enterprise directory ($enterprise_files)"
         echo -e "${YELLOW}${BOLD}⚠ Few files found in enterprise directory. Enterprise features may not work.${RESET}"
+        
+        # List host enterprise content
+        local host_files=$(ls -1A "$INSTALL_DIR/enterprise/" 2>/dev/null | wc -l || echo "0")
+        echo -e "${YELLOW}Found $host_files files in host enterprise directory${RESET}"
+        
+        # If host has files but container doesn't, it's a mount issue
+        if [ "$host_files" -gt 5 ]; then
+            log WARNING "Detected mount issue: host directory has files but container doesn't see them"
+            echo -e "${YELLOW}${BOLD}⚠ Detected mount issue! Copying files directly to container...${RESET}"
+            
+            for file in "$INSTALL_DIR/enterprise/"*; do
+                if [ -d "$file" ]; then
+                    docker cp "$file" "$CONTAINER_NAME:/mnt/enterprise/$(basename "$file")"
+                    echo -e "${YELLOW}Copied $(basename "$file") to container${RESET}"
+                fi
+            done
+            
+            # Verify files were copied
+            enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
+            if [ "$enterprise_files" -lt 5 ]; then
+                log ERROR "Files still not available in container after direct copy"
+                echo -e "${RED}${BOLD}⚠ Files still missing in container after direct copy!${RESET}"
+            else
+                log INFO "Successfully copied $enterprise_files files to container"
+                echo -e "${GREEN}Successfully copied $enterprise_files files to container${RESET}"
+            fi
+        fi
     else
         log INFO "Enterprise directory contains $enterprise_files files/directories"
         echo -e "${GREEN}${BOLD}✓${RESET} Enterprise files found ($enterprise_files files/directories)"
     fi
     
-    # Update Odoo configuration to ensure enterprise path is first in addons_path
-    log INFO "Updating Odoo configuration"
+    # Ensure odoo.conf exists with correct addons_path
+    log INFO "Checking odoo.conf configuration"
+    if ! docker exec $CONTAINER_NAME [ -f /etc/odoo/odoo.conf ] 2>/dev/null; then
+        log WARNING "odoo.conf not found, creating it"
+        echo -e "${YELLOW}Creating missing odoo.conf file${RESET}"
+        
+        docker exec $CONTAINER_NAME bash -c 'mkdir -p /etc/odoo && echo "[options]
+addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+data_dir = /var/lib/odoo" > /etc/odoo/odoo.conf'
+    fi
+
+    # Update addons_path to ensure enterprise path is first
     docker exec $CONTAINER_NAME bash -c 'if ! grep -q "^addons_path" /etc/odoo/odoo.conf; then 
         echo "addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons" >> /etc/odoo/odoo.conf
     else 
@@ -1518,16 +1598,22 @@ ensure_enterprise_modules() {
     fi'
     
     # Verify configuration
-    local addons_path=$(docker exec $CONTAINER_NAME grep "^addons_path" /etc/odoo/odoo.conf)
+    local addons_path=$(docker exec $CONTAINER_NAME grep "^addons_path" /etc/odoo/odoo.conf 2>/dev/null || echo "No addons_path found")
     log INFO "Updated addons_path: $addons_path"
+    
+    # Set correct permissions
+    log INFO "Setting correct permissions on enterprise directory"
+    echo -e "${CYAN}Setting correct permissions on enterprise directory...${RESET}"
+    docker exec $CONTAINER_NAME chown -R odoo:odoo /mnt/enterprise /mnt/extra-addons 2>/dev/null
     
     # Restart Odoo service to apply changes
     log INFO "Restarting Odoo service"
     echo -e "${CYAN}Restarting Odoo to apply configuration changes...${RESET}"
+    cd "$INSTALL_DIR"
     docker compose restart web
     
     # Wait for Odoo to restart
-    sleep 10
+    sleep 15
     
     # Update module list to recognize enterprise modules
     log INFO "Updating module list"
@@ -1616,3 +1702,4 @@ main() {
 
 # Execute main function
 main "$@"
+
