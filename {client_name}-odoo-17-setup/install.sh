@@ -1112,30 +1112,106 @@ initialize_database() {
     # Prepare database: Drop if exists and create new
     INFO "Preparing clean database state for $DB_NAME..."
     
+    # Check if PostgreSQL is responsive first
+    INFO "Checking if PostgreSQL is responsive..."
+    if ! docker exec "$DB_CONTAINER" pg_isready -q; then
+        ERROR "PostgreSQL is not responsive in container $DB_CONTAINER"
+        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        return 1
+    fi
+    
+    # Verify the postgres user exists and has required permissions
+    INFO "Verifying database user access..."
+    if ! docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1;" >/dev/null 2>&1; then
+        ERROR "Cannot connect to PostgreSQL with 'postgres' user. Check if the user exists and has proper permissions."
+        echo -e "${RED}PostgreSQL connection failed with user 'postgres'. Trying to troubleshoot...${RESET}"
+        
+        # List PostgreSQL users for diagnostic purposes
+        echo -e "${YELLOW}Available PostgreSQL users:${RESET}"
+        docker exec "$DB_CONTAINER" psql -c "SELECT usename FROM pg_user;" || true
+        
+        # Try with the odoo user if postgres fails
+        echo -e "${YELLOW}Trying with 'odoo' user instead...${RESET}"
+        if docker exec "$DB_CONTAINER" psql -U "$DB_USER" -c "SELECT 1;" >/dev/null 2>&1; then
+            WARNING "Connected with 'odoo' user, but this user may not have appropriate permissions to create databases."
+            echo -e "${YELLOW}Will try to continue with 'odoo' user, but may encounter permission issues.${RESET}"
+            # Continue with the odoo user
+            DB_ADMIN_USER="$DB_USER"
+        else
+            ERROR "Cannot connect to PostgreSQL with either 'postgres' or 'odoo' user."
+            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            return 1
+        fi
+    else
+        DB_ADMIN_USER="postgres"
+    fi
+    
     # Terminate existing connections to allow dropping the database
-    docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" >/dev/null 2>&1 || true
+    INFO "Terminating existing connections to database..."
+    docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1 || true
     
     # Drop existing database if it exists
-    docker exec "$DB_CONTAINER" psql -U postgres -c "DROP DATABASE IF EXISTS $DB_NAME;" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    INFO "Dropping existing database if it exists..."
+    if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1; then
         WARNING "Could not drop existing database, it may not exist or might be in use."
+        echo -e "${YELLOW}Failed to drop database. Trying with force disconnect of all connections...${RESET}"
+        
+        # Force disconnect all connections more aggressively
+        docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "
+            UPDATE pg_database SET datallowconn = false WHERE datname = '$DB_NAME';
+            SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$DB_NAME';
+        " 2>&1 || true
+        
+        # Try dropping again
+        if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1; then
+            WARNING "Still could not drop database after aggressive termination. Will try to continue."
+        else
+            INFO "Successfully dropped database after aggressive connection termination."
+        fi
     fi
     
     # Create fresh database
     INFO "Creating new database $DB_NAME with owner $DB_USER..."
-    docker exec "$DB_CONTAINER" psql -U postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    if ! docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1; then
         ERROR "Failed to create new database $DB_NAME."
-        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        return 1
+        echo -e "${RED}Failed to create database. Checking if database already exists...${RESET}"
+        
+        # Check if database already exists
+        if docker exec "$DB_CONTAINER" psql -U $DB_ADMIN_USER -c "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>&1 | grep -q "1 row"; then
+            WARNING "Database $DB_NAME already exists. Will try to continue with existing database."
+        else
+            ERROR "Cannot create database and it doesn't exist. Cannot continue."
+            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            return 1
+        fi
     fi
     
     # Get the Odoo image from docker-compose.yml
     ODOO_IMAGE=$(grep -A 5 "^  web:" docker-compose.yml | grep "image:" | sed 's/.*image: *//g')
     if [ -z "$ODOO_IMAGE" ]; then
-        ERROR "Could not determine Odoo image from docker-compose.yml"
-        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        return 1
+        # Try alternative docker-compose format
+        ODOO_IMAGE=$(grep -A 5 "web:" docker-compose.yml | grep "image:" | sed 's/.*image: *//g')
+        if [ -z "$ODOO_IMAGE" ]; then
+            ERROR "Could not determine Odoo image from docker-compose.yml"
+            echo -e "${RED}Failed to extract Odoo image name from docker-compose.yml${RESET}"
+            echo -e "${YELLOW}Checking container image directly...${RESET}"
+            
+            # Try to get image from existing container
+            if docker ps -a | grep -q "$CONTAINER_NAME"; then
+                ODOO_IMAGE=$(docker inspect --format='{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null)
+                if [ -n "$ODOO_IMAGE" ]; then
+                    INFO "Retrieved Odoo image from container: $ODOO_IMAGE"
+                else
+                    ERROR "Could not determine Odoo image. Please check your docker-compose.yml"
+                    docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+                    return 1
+                fi
+            else
+                ERROR "Could not determine Odoo image and container doesn't exist. Please check your docker-compose.yml"
+                docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+                return 1
+            fi
+        fi
     fi
     DEBUG "Using Odoo image: $ODOO_IMAGE"
     
@@ -1145,6 +1221,14 @@ initialize_database() {
     
     # Generate a unique name for the temporary container
     TEMP_CONTAINER="odoo-init-$(date +%s)"
+    
+    # Make sure enterprise and addons directories exist
+    mkdir -p "$PWD/enterprise" "$PWD/addons"
+    
+    # Display the command we're going to run
+    echo -e "${YELLOW}Running temporary container with command:${RESET}"
+    echo -e "docker run --rm --name $TEMP_CONTAINER --network=$DOCKER_NETWORK [with mounted volumes]"
+    echo -e "odoo --stop-after-init --init=base,web ... -d $DB_NAME --db_host=db --db_user=$DB_USER"
     
     # Run temporary container with proper mounts and network
     INIT_OUTPUT=$(docker run --rm \
@@ -1171,8 +1255,20 @@ initialize_database() {
     INIT_STATUS=$?
     if [ $INIT_STATUS -ne 0 ]; then
         ERROR "Database initialization failed with exit code $INIT_STATUS"
-        ERROR "Initialization output: $(echo "$INIT_OUTPUT" | head -n 10)"
+        # Show the full error log for better debugging
+        echo -e "${RED}Initialization failed with the following output:${RESET}"
+        echo "$INIT_OUTPUT" | tail -n 20
         echo "$INIT_OUTPUT" >> "$LOG_FILE"
+        
+        # Try to display any log messages from the database container as well
+        echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
+        docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
+        
+        # Check if the odoo container is accessible on the network
+        echo -e "${YELLOW}Checking network connectivity between containers:${RESET}"
+        docker run --rm --network="$DOCKER_NETWORK" alpine ping -c 2 db || true
+        
+        echo -e "${YELLOW}You may need to review the database configuration or restart the containers.${RESET}"
         docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
         return 1
     fi
@@ -1182,31 +1278,62 @@ initialize_database() {
     docker start "$CONTAINER_NAME" >/dev/null 2>&1
     if [ $? -ne 0 ]; then
         ERROR "Failed to restart main Odoo container."
+        echo -e "${RED}Failed to restart the main Odoo container. Checking container status...${RESET}"
+        docker ps -a | grep "$CONTAINER_NAME" || true
         return 1
     fi
     
-    # Wait for container to be fully up
+    # Wait for container to be fully up with clear progress indication
+    echo -e "${YELLOW}Waiting for Odoo container to fully start...${RESET}"
     wait_for_container "$CONTAINER_NAME" 30 2
     
     # Verify database initialization
     INFO "Verifying database initialization..."
+    echo -e "${CYAN}Verifying database tables...${RESET}"
+    
+    # Check if we can connect to the database
+    if ! docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1;" >/dev/null 2>&1; then
+        ERROR "Cannot connect to the newly created database as user $DB_USER"
+        echo -e "${RED}Failed to connect to the database after initialization.${RESET}"
+        return 1
+    fi
+    
+    # Count tables
     TABLE_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
     
     if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 20 ]; then
         ERROR "Database verification failed. Expected at least 20 tables, found: $TABLE_COUNT"
+        echo -e "${RED}Database validation failed. Only $TABLE_COUNT tables found (expected >20).${RESET}"
+        
+        # List the tables that do exist for diagnostic purposes
+        echo -e "${YELLOW}Tables in database:${RESET}"
+        docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' LIMIT 30;" || true
+        
         return 1
     fi
     
     # Verify specific critical tables exist
+    echo -e "${CYAN}Checking for critical tables...${RESET}"
     CRITICAL_TABLES=("ir_module_module" "res_users" "ir_model" "res_company")
+    MISSING_TABLES=()
+    
     for table in "${CRITICAL_TABLES[@]}"; do
         TABLE_EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$table');" 2>/dev/null | tr -d '[:space:]')
         if [ "$TABLE_EXISTS" != "t" ]; then
             ERROR "Critical table '$table' not found in database."
-            return 1
+            MISSING_TABLES+=("$table")
+        else
+            echo -e "${GREEN}✓ Table $table exists${RESET}"
         fi
     done
     
+    if [ ${#MISSING_TABLES[@]} -gt 0 ]; then
+        ERROR "Database is missing critical tables: ${MISSING_TABLES[*]}"
+        echo -e "${RED}Database initialization is incomplete. Missing tables: ${MISSING_TABLES[*]}${RESET}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully with $TABLE_COUNT tables created."
     INFO "Database initialization completed successfully with $TABLE_COUNT tables created."
     return 0
 }
