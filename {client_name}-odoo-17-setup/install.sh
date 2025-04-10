@@ -955,41 +955,79 @@ initialize_database() {
         fi
     fi
 
-    # Method 1: Initialize using docker compose (preserves network configuration)
-    log INFO "Initializing database through docker compose..."
-    echo -e "${CYAN}Creating database using docker compose network...${RESET}"
+    # Method 1: Direct Odoo init command with timeout
+    log INFO "Trying direct initialization command..."
+    echo -e "${CYAN}Running initialization command directly...${RESET}"
     
-    # Use docker compose run to ensure proper network configuration
+    # Create database if it doesn't exist
+    docker exec $DB_CONTAINER psql -U $DB_USER postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
+    
+    # Stop Odoo container first
     cd "$INSTALL_DIR"
     docker compose stop web
     sleep 5
-    docker compose run --rm web --stop-after-init --init=base,web,mail -d $DB_NAME --without-demo=all
+    
+    # Run Odoo init command directly with a timeout
+    log INFO "Running Odoo init command with timeout..."
+    echo -e "${YELLOW}This might take a minute or two...${RESET}"
+    
+    # Use timeout to prevent hanging
+    timeout 120s docker compose run --rm web --stop-after-init --init=base -d $DB_NAME
+    INIT_RESULT=$?
+    
+    # Start web container
     docker compose up -d web
     
-    # Check if initialization succeeded
-    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" | grep -q "1"; then
-        log INFO "Database initialized successfully with docker compose method"
+    # Check if initialization worked or if timeout occurred
+    if [ $INIT_RESULT -eq 124 ]; then
+        log WARNING "Initialization command timed out but might still be working"
+        echo -e "${YELLOW}Command timed out, but database might still be initializing properly${RESET}"
+        echo -e "${YELLOW}Waiting a bit longer for initialization to complete...${RESET}"
+        sleep 20
+    elif [ $INIT_RESULT -ne 0 ]; then
+        log WARNING "Initialization command failed with exit code $INIT_RESULT"
+        echo -e "${YELLOW}Initialization command failed, trying alternative methods...${RESET}"
+    else
+        log INFO "Initialization command completed successfully"
+    fi
+    
+    # Check if initialization succeeded regardless of command result
+    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+        log INFO "Database initialized successfully"
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
         return 0
     fi
 
-    # Method 2: Try using --no-http to avoid port conflicts with existing container
-    log INFO "Trying initialization with --no-http parameter..."
-    echo -e "${CYAN}Trying initialization with --no-http through existing container...${RESET}"
+    # Method 2: Initialize through docker exec on existing container
+    log INFO "Trying initialization through exec..."
+    echo -e "${CYAN}Trying to initialize through existing container...${RESET}"
     
-    # Use --no-http to avoid port conflicts with already running Odoo
-    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base,web,mail -d $DB_NAME --without-demo=all
+    # Start web container if not running
+    if ! docker ps | grep -q "$CONTAINER_NAME"; then
+        log INFO "Starting Odoo container..."
+        docker compose up -d web
+        sleep 10
+    fi
+    
+    # Try initialization through exec with --no-http
+    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME
     
     # Check if initialization succeeded
-    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" | grep -q "1"; then
-        log INFO "Database initialized successfully with --no-http method"
+    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+        log INFO "Database initialized successfully via exec method"
         echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
         return 0
     fi
 
-    # Method 3: Try the database manager creation API
-    log INFO "Trying initialization via web API..."
+    # Method 3: Try database creation via API
+    log INFO "Trying database creation via API..."
     echo -e "${CYAN}Creating database via web API...${RESET}"
+    
+    # Ensure web container is running
+    docker compose up -d web
+    sleep 10
+    
+    # Use API to create database
     curl -s -X POST \
         -H "Content-Type: application/json" \
         -d '{
@@ -1006,32 +1044,54 @@ initialize_database() {
         }' \
         http://localhost:8069/web/database/create > /dev/null
         
+    sleep 20
+    
+    # Check if initialization succeeded
+    if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" 2>/dev/null | grep -q "[1-9]"; then
+        log INFO "Database initialized successfully via API method"
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+        return 0
+    fi
+    
+    # Method 4: Full restart with a direct CLI command
+    log INFO "Trying complete restart with CLI initialization..."
+    echo -e "${CYAN}Performing complete restart with CLI initialization...${RESET}"
+    
+    # Stop everything
+    docker compose down
+    sleep 5
+    
+    # Delete all PostgreSQL data to start fresh
+    echo -e "${YELLOW}Clearing existing database data...${RESET}"
+    sudo rm -rf "$INSTALL_DIR/volumes/postgres-data/*" 2>/dev/null || true
+    
+    # Start database container
+    docker compose up -d db
     sleep 15
     
-    # Method 4: Complete restart with docker compose down and up
-    if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
-        log WARNING "Previous methods failed, trying with complete restart..."
-        echo -e "${YELLOW}Previous methods failed, trying with complete restart...${RESET}"
-        
-        # Use docker compose for proper network configuration
-        cd "$INSTALL_DIR"
-        docker compose down
-        sleep 5
-        docker compose up -d db
-        sleep 15
-        docker compose run --rm web --stop-after-init --init=base,web,mail -d $DB_NAME --without-demo=all
-        docker compose up -d
-    fi
-
+    # Run a simplified version of the initialization
+    echo -e "${YELLOW}Running database initialization command...${RESET}"
+    timeout 180s docker run --rm --network={client_name}-odoo-17_default \
+        -v "$INSTALL_DIR/enterprise:/mnt/enterprise:ro" \
+        -v "$INSTALL_DIR/addons:/mnt/extra-addons:ro" \
+        odoo:17.0 --stop-after-init --init=base \
+        -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    
+    # Start normal containers
+    docker compose up -d
+    
     # Final verification
+    sleep 10
     if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
         log ERROR "Database initialization failed after all attempts"
         echo -e "${RED}${BOLD}⚠ Database initialization failed after multiple attempts${RESET}"
         echo -e "${YELLOW}Try these manual steps:${RESET}"
         echo -e "${YELLOW}1. Stop all containers: cd $INSTALL_DIR && docker compose down${RESET}"
-        echo -e "${YELLOW}2. Remove volumes: rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
-        echo -e "${YELLOW}3. Restart and initialize: docker compose up -d db && sleep 10 && docker compose run --rm web --stop-after-init --init=base -d $DB_NAME${RESET}"
-        echo -e "${YELLOW}4. Start normally: docker compose up -d${RESET}"
+        echo -e "${YELLOW}2. Remove volumes: sudo rm -rf $INSTALL_DIR/volumes/postgres-data/*${RESET}" 
+        echo -e "${YELLOW}3. Start database: docker compose up -d db${RESET}"
+        echo -e "${YELLOW}4. Wait 10 seconds${RESET}"
+        echo -e "${YELLOW}5. Initialize: docker run --rm --network={client_name}-odoo-17_default odoo:17.0 --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS${RESET}"
+        echo -e "${YELLOW}6. Start normally: docker compose up -d${RESET}"
         return 1
     fi
 
