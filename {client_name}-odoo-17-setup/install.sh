@@ -1258,66 +1258,153 @@ initialize_database() {
     echo -e "docker run --rm --name $TEMP_CONTAINER --network=$DOCKER_NETWORK [with mounted volumes]"
     echo -e "odoo --stop-after-init --init=base,web ... -d $DB_NAME --db_host=db --db_user=$DB_USER"
     
-    # Run temporary container with proper mounts and network
+    # Run the container with detailed logging and better error handling
+    echo -e "${YELLOW}Testing network connectivity to database container...${RESET}"
+    if ! docker network inspect "$DOCKER_NETWORK" | grep -q "\"$DB_CONTAINER\""; then
+        ERROR "Database container $DB_CONTAINER not found on network $DOCKER_NETWORK"
+        echo -e "${RED}Network connectivity issue: Database container not found on network.${RESET}"
+        echo -e "${YELLOW}Available containers on network $DOCKER_NETWORK:${RESET}"
+        docker network inspect "$DOCKER_NETWORK" | grep -A 10 "\"Containers\"" || true
+        
+        echo -e "${YELLOW}Attempting to ping database container by name...${RESET}"
+        docker run --rm --network="$DOCKER_NETWORK" alpine ping -c 2 db || {
+            echo -e "${RED}Cannot ping 'db' in the Docker network. This suggests a network configuration issue.${RESET}"
+            echo -e "${YELLOW}Will try to restart the database container and retry...${RESET}"
+            docker restart "$DB_CONTAINER" || true
+            sleep 5
+        }
+    fi
+    
+    # Make sure permissions are correct for volume mounts
     echo -e "${YELLOW}Making sure permissions are correct for volume mounts...${RESET}"
     mkdir -p "$PWD/enterprise" "$PWD/addons"
     chmod -R 755 "$PWD/enterprise" "$PWD/addons" 2>/dev/null || true
     
-    echo -e "${YELLOW}Running temporary container with the following parameters:${RESET}"
-    echo -e "Network: $DOCKER_NETWORK"
-    echo -e "Database: $DB_NAME"
-    echo -e "Database User: $DB_USER"
-    echo -e "Volume mounts: enterprise and addons directories"
-    
-    # For debugging - verify volume paths
+    # Print volume information
     echo -e "${YELLOW}Volume paths:${RESET}"
     echo -e "Enterprise dir: $PWD/enterprise ($(ls -la "$PWD/enterprise" | wc -l) items)"
     echo -e "Addons dir: $PWD/addons ($(ls -la "$PWD/addons" | wc -l) items)"
     
-    # Run the container with detailed logging and better error handling
-    INIT_OUTPUT=$(docker run --rm \
-        --name "$TEMP_CONTAINER" \
-        --network="$DOCKER_NETWORK" \
-        -v "$PWD/enterprise:/mnt/enterprise:z" \
-        -v "$PWD/addons:/mnt/extra-addons:z" \
-        -e "DB_HOST=db" \
-        -e "DB_PORT=5432" \
-        -e "DB_USER=$DB_USER" \
-        -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
-        -e "LANG=C.UTF-8" \
-        -e "TZ=UTC" \
-        "$ODOO_IMAGE" \
-        -- \
-        --stop-after-init \
-        --init=base,web \
-        --load-language=en_US \
-        --without-demo=all \
-        --log-level=info \
-        -d "$DB_NAME" \
-        --db_host=db \
-        --db_port=5432 \
-        --db_user="$DB_USER" \
-        --db_password="$DB_WORKING_PASSWORD" 2>&1)
+    echo -e "${YELLOW}Running temporary Odoo container to initialize database...${RESET}"
+    # Use a wrapper script with timeout to prevent hanging indefinitely
+    (
+        # Set a timeout of 180 seconds (3 minutes)
+        TIMEOUT=180
+        echo -e "${YELLOW}Setting timeout of $TIMEOUT seconds for initialization...${RESET}"
+        
+        # Run the command and capture PID
+        docker run --rm \
+            --name "$TEMP_CONTAINER" \
+            --network="$DOCKER_NETWORK" \
+            -v "$PWD/enterprise:/mnt/enterprise:z" \
+            -v "$PWD/addons:/mnt/extra-addons:z" \
+            -e "DB_HOST=db" \
+            -e "DB_PORT=5432" \
+            -e "DB_USER=$DB_USER" \
+            -e "DB_PASSWORD=$DB_WORKING_PASSWORD" \
+            -e "LANG=C.UTF-8" \
+            -e "TZ=UTC" \
+            "$ODOO_IMAGE" \
+            -- \
+            --stop-after-init \
+            --init=base,web \
+            --load-language=en_US \
+            --without-demo=all \
+            --log-level=info \
+            -d "$DB_NAME" \
+            --db_host=db \
+            --db_port=5432 \
+            --db_user="$DB_USER" \
+            --db_password="$DB_WORKING_PASSWORD" > /tmp/odoo_init_output.log 2>&1 &
+        
+        PID=$!
+        
+        # Display status spinner while waiting
+        ELAPSED=0
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+            if ! kill -0 $PID 2>/dev/null; then
+                # Process has finished
+                wait $PID
+                INIT_STATUS=$?
+                cat /tmp/odoo_init_output.log
+                rm -f /tmp/odoo_init_output.log
+                exit $INIT_STATUS
+            fi
+            
+            # Print spinner
+            SPINNER_CHAR=$(echo -e "⠋\n⠙\n⠹\n⠸\n⠼\n⠴\n⠦\n⠧\n⠇\n⠏" | sed -n "$((ELAPSED % 10 + 1))p")
+            echo -ne "${YELLOW}Initializing database... $SPINNER_CHAR Elapsed: ${ELAPSED}s${RESET}\r"
+            
+            sleep 1
+            ELAPSED=$((ELAPSED + 1))
+        done
+        
+        # If we get here, the timeout was reached
+        echo -e "\n${RED}Timeout reached after $TIMEOUT seconds. Aborting initialization.${RESET}"
+        docker kill "$TEMP_CONTAINER" 2>/dev/null || true
+        echo -e "${YELLOW}Checking for container logs before killing...${RESET}"
+        docker logs "$TEMP_CONTAINER" 2>/dev/null || echo "No logs available"
+        
+        # Capture any output that was generated
+        if [ -f /tmp/odoo_init_output.log ]; then
+            echo -e "${YELLOW}Output captured so far:${RESET}"
+            cat /tmp/odoo_init_output.log
+            rm -f /tmp/odoo_init_output.log
+        fi
+        
+        exit 1
+    )
     
     INIT_STATUS=$?
+    
     if [ $INIT_STATUS -ne 0 ]; then
         ERROR "Database initialization failed with exit code $INIT_STATUS"
-        # Show the full error log for better debugging
-        echo -e "${RED}Initialization failed with the following output:${RESET}"
-        echo "$INIT_OUTPUT" | tail -n 20
-        echo "$INIT_OUTPUT" >> "$LOG_FILE"
+        echo -e "${RED}Database initialization failed. Attempting to gather diagnostic information...${RESET}"
         
-        # Try to display any log messages from the database container as well
-        echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
-        docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
+        # Check if the database was partially initialized
+        echo -e "${YELLOW}Checking if database was partially initialized...${RESET}"
+        TABLE_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]' || echo "0")
         
-        # Check if the odoo container is accessible on the network
-        echo -e "${YELLOW}Checking network connectivity between containers:${RESET}"
-        docker run --rm --network="$DOCKER_NETWORK" alpine ping -c 2 db || true
-        
-        echo -e "${YELLOW}You may need to review the database configuration or restart the containers.${RESET}"
-        docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        return 1
+        if [ "$TABLE_COUNT" -gt 0 ]; then
+            echo -e "${YELLOW}Database contains $TABLE_COUNT tables. Partial initialization may have occurred.${RESET}"
+            
+            # Check for known tables
+            echo -e "${YELLOW}Checking for key Odoo tables...${RESET}"
+            for table in "ir_module_module" "res_users" "ir_model"; do
+                EXISTS=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$table');" 2>/dev/null | tr -d '[:space:]' || echo "f")
+                echo -e "Table $table: $([ "$EXISTS" = "t" ] && echo "${GREEN}exists${RESET}" || echo "${RED}missing${RESET}")"
+            done
+            
+            # Despite failure, if we have some tables, we might try to continue
+            if [ "$TABLE_COUNT" -gt 10 ] && docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='ir_module_module');" 2>/dev/null | grep -q "t"; then
+                echo -e "${YELLOW}Database appears to be partially initialized with critical tables. Will attempt to continue.${RESET}"
+                WARNING "Database partially initialized. Attempting to continue despite initialization failure."
+            else
+                echo -e "${RED}Database initialization incomplete. Not enough tables or missing critical tables.${RESET}"
+                # Try to display any log messages from the database container as well
+                echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
+                docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
+                
+                # Check if the odoo container is accessible on the network
+                echo -e "${YELLOW}Checking network connectivity details:${RESET}"
+                echo "Docker network configuration for $DOCKER_NETWORK:"
+                docker network inspect "$DOCKER_NETWORK" | grep -A 20 "Containers" || true
+                
+                docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+                return 1
+            fi
+        else
+            # No tables at all - complete failure
+            echo -e "${RED}No tables found in database. Initialization completely failed.${RESET}"
+            # Try to display any log messages from the database container as well
+            echo -e "${YELLOW}Last PostgreSQL container logs:${RESET}"
+            docker logs --tail 20 "$DB_CONTAINER" 2>&1 || true
+            
+            docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            return 1
+        fi
+    else
+        echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully!"
     fi
     
     # Restart the main Odoo container
