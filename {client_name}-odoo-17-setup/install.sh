@@ -954,30 +954,52 @@ initialize_database() {
     log INFO "Initializing database using Odoo command line..."
     echo -e "${CYAN}Initializing database with Odoo base module...${RESET}"
     
-    docker exec $CONTAINER_NAME odoo --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    # Use --no-http to avoid port conflicts with already running Odoo
+    docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
     
     if [ $? -ne 0 ]; then
-        # Try alternative approach with database creation API
-        log WARNING "Command line initialization failed, trying API approach..."
-        echo -e "${YELLOW}Command line initialization failed, trying alternative approach...${RESET}"
+        # Try stopping Odoo first, then initializing
+        log WARNING "Command line initialization failed, trying with container restart..."
+        echo -e "${YELLOW}Command line initialization failed, trying with container restart...${RESET}"
         
-        # Create the first database using Odoo's API
-        echo -e "${CYAN}Creating initial database via API...${RESET}"
-        curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -d '{
-                "jsonrpc": "2.0",
-                "method": "call",
-                "params": {
-                    "master_pwd": "'$ADMIN_PASS'",
-                    "name": "'$DB_NAME'",
-                    "login": "admin",
-                    "password": "'$ADMIN_PASS'",
-                    "lang": "en_US",
-                    "country_code": "es"
-                }
-            }' \
-            http://localhost:8069/web/database/create > /dev/null
+        # Stop Odoo container
+        docker stop $CONTAINER_NAME
+        
+        # Start Odoo with initialization parameters
+        docker run --rm --link $DB_CONTAINER:db \
+            -v "$INSTALL_DIR/config:/etc/odoo" \
+            -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
+            -v "$INSTALL_DIR/enterprise:/mnt/enterprise" \
+            -v "$INSTALL_DIR/addons:/mnt/extra-addons" \
+            -v "$INSTALL_DIR/logs:/var/log/odoo" \
+            odoo:17.0 --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+        
+        # Restart the original container
+        docker start $CONTAINER_NAME
+        
+        if [ $? -ne 0 ]; then
+            # Try alternative approach with database creation API
+            log WARNING "Container restart approach failed, trying API method..."
+            echo -e "${YELLOW}Container restart approach failed, trying alternative approach...${RESET}"
+            
+            # Create the first database using Odoo's API
+            echo -e "${CYAN}Creating initial database via API...${RESET}"
+            curl -s -X POST \
+                -H "Content-Type: application/json" \
+                -d '{
+                    "jsonrpc": "2.0",
+                    "method": "call",
+                    "params": {
+                        "master_pwd": "'$ADMIN_PASS'",
+                        "name": "'$DB_NAME'",
+                        "login": "admin",
+                        "password": "'$ADMIN_PASS'",
+                        "lang": "en_US",
+                        "country_code": "es"
+                    }
+                }' \
+                http://localhost:8069/web/database/create > /dev/null
+        fi
     fi
 
     # Verify initialization
@@ -985,7 +1007,7 @@ initialize_database() {
         log ERROR "Database initialization failed"
         echo -e "${RED}${BOLD}⚠ Database initialization failed${RESET}"
         echo -e "${YELLOW}You can try manual initialization with:${RESET}"
-        echo -e "${YELLOW}docker exec $CONTAINER_NAME odoo --stop-after-init --init=base -d $DB_NAME${RESET}"
+        echo -e "${YELLOW}docker exec $CONTAINER_NAME odoo --stop-after-init --no-http --init=base -d $DB_NAME${RESET}"
         return 1
     fi
 
