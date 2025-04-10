@@ -1030,7 +1030,7 @@ initialize_database() {
     # Wait for services to be ready
     echo -e "${YELLOW}Waiting for services to start...${RESET}"
     sleep 10
-    
+
     DEBUG "Starting database initialization process"
     DEBUG "Target database: $DB_NAME, DB User: $DB_USER"
     DEBUG "Container names - Odoo: $CONTAINER_NAME, PostgreSQL: $DB_CONTAINER"
@@ -1187,14 +1187,14 @@ initialize_database() {
     
     # Prepare API request
     api_request='{
-        "jsonrpc": "2.0",
-        "method": "call",
-        "params": {
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
             "master_pwd": "'$pg_password'",
-            "name": "'$DB_NAME'",
-            "login": "admin",
+                "name": "'$DB_NAME'",
+                "login": "admin",
             "password": "'$pg_password'",
-            "lang": "en_US",
+                "lang": "en_US",
             "country_code": "es",
             "phone": ""
         }
@@ -1217,7 +1217,7 @@ initialize_database() {
         curl -s -X POST \
             -H "Content-Type: application/json" \
             -d "$api_request" \
-            http://localhost:8069/web/database/create > /dev/null
+        http://localhost:8069/web/database/create > /dev/null
     fi
     
     echo -e "${YELLOW}Waiting for database creation to complete...${RESET}"
@@ -1519,7 +1519,7 @@ main() {
     verify_installation
     
     # Show completion message if everything succeeded
-    if [ $? -eq 0 ]; then
+        if [ $? -eq 0 ]; then
         show_completion
         INFO "Installation completed successfully"
         DEBUG "All installation steps completed without errors"
