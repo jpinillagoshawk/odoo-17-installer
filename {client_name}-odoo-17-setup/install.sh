@@ -1672,13 +1672,16 @@ EOF'
                 log INFO "Successfully fixed mount issues with direct file copy"
                 echo -e "${GREEN}${BOLD}✓${RESET} Successfully fixed mount issues!"
                 echo -e "${GREEN}Enterprise modules found: $enterprise_files, Config file found: $config_found${RESET}"
+            fi
         else
             log INFO "Mount issues fixed with configuration update"
             echo -e "${GREEN}${BOLD}✓${RESET} Mount issues fixed with configuration update!"
             echo -e "${GREEN}Enterprise modules found: $enterprise_files, Config file found: $config_found${RESET}"
+        fi
     else
         log INFO "No mount issues detected"
         echo -e "${GREEN}${BOLD}✓${RESET} No Docker mount issues detected"
+    fi
     
     # Update Odoo configuration to ensure enterprise path is first
     log INFO "Ensuring correct odoo.conf configuration"
