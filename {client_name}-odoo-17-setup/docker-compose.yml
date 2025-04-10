@@ -13,13 +13,14 @@ services:
       - ./enterprise:/mnt/enterprise
       - ./addons:/mnt/extra-addons
       - ./logs:/var/log/odoo
+      - ./filestore:/var/lib/odoo/filestore
     environment:
       - HOST=db
       - PORT={db_port}
       - USER=odoo
       - PASSWORD={client_password}
       - PROXY_MODE=True
-    command: -- --init=base -d postgres_{client_name}
+    command: --db_host=db --db_user=odoo --db_password={client_password}
     logging:
       driver: "json-file"
       options:

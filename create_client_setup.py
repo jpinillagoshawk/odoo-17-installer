@@ -61,7 +61,8 @@ DIRS_TO_CREATE = [
     "backups/monthly",
     "logs",
     "enterprise",
-    "addons"
+    "addons",
+    "filestore"
 ]
 
 # Default odoo.conf content
@@ -88,7 +89,7 @@ proxy_mode = True
 # Default configuration values
 DEFAULT_CONFIG = {
     'user': 'ubuntu',
-    'ip': '195.190.194.108',  # Default IP
+    'ip': '',  # No default IP - will be detected if blank
     'odoo_port': '8069',
     'db_port': '5432',
     'db_user': 'odoo',
@@ -102,8 +103,8 @@ def print_usage():
     print("\nConfig file format example:")
     print("client_name=acme")
     print("client_password=acme2025")
-    print("user=ubuntu")
-    print("ip=195.190.194.108")
+    print("user=root")
+    print("ip=localhost")  # Empty IP - will be auto-detected
     print("odoo_port=8069")
     print("db_port=5432")
     print("db_user=odoo")
@@ -111,12 +112,26 @@ def print_usage():
 
 def get_public_ip():
     """Get the public IP of the machine"""
-    try:
-        # Fallback to default IP
-        return "195.190.194.108"
-    except:
-        print("Warning: Could not determine public IP. Using default.")
-        return "195.190.194.108"
+    services = [
+        "https://api.ipify.org",
+        "https://ipinfo.io/ip",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com"
+    ]
+    
+    for service in services:
+        try:
+            import urllib.request
+            response = urllib.request.urlopen(service, timeout=5)
+            ip = response.read().decode('utf-8').strip()
+            if ip and len(ip) <= 15:  # Basic validation for IPv4
+                return ip
+        except Exception as e:
+            continue
+    
+    # If all services fail
+    print("Warning: Could not determine public IP. Please specify it manually in the config file.")
+    return "localhost"
 
 def normalize_install_path(config):
     """Create a normalized installation path from configuration"""
@@ -370,6 +385,12 @@ def update_docker_compose(file_path, config):
         content
     )
 
+    # Add filestore volume mapping if it doesn't exist
+    if './filestore:/var/lib/odoo/filestore' not in content:
+        volumes_pattern = r'(volumes:\s+(?:- .*\n\s+)+)'
+        volumes_replacement = r'\1      - ./filestore:/var/lib/odoo/filestore\n    '
+        content = re.sub(volumes_pattern, volumes_replacement, content)
+
     # Update database port if needed
     if config['db_port'] != '5432':
         content = content.replace('PORT=5432', f'PORT={config["db_port"]}')
@@ -521,8 +542,8 @@ client_name=acme
 client_password=acme2025
 
 # Optional parameters (leave blank for defaults)
-user=ubuntu
-ip=195.190.194.108
+user=root
+ip=
 odoo_port=8069
 db_port=5432
 db_user=odoo
