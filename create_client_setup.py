@@ -564,23 +564,36 @@ path_to_install=
 
 def main():
     """Main function"""
+    # Get the directory where the script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     if len(sys.argv) != 2:
         print_usage()
         if len(sys.argv) == 1:
-            # Check if config file already exists
-            if os.path.exists('odoo-17-setup.conf'):
-                print("\nUsing existing configuration file: odoo-17-setup.conf")
-                config_file = 'odoo-17-setup.conf'
+            # Check if config file already exists in the script's directory
+            config_path = os.path.join(script_dir, 'odoo-17-setup.conf')
+            if os.path.exists(config_path):
+                print(f"\nUsing existing configuration file: {config_path}")
+                config_file = config_path
             else:
-                # Create a sample config file
-                create_sample_config('odoo-17-setup.conf')
-                print("\nA sample configuration file has been created: odoo-17-setup.conf")
+                # Create a sample config file in the script's directory
+                create_sample_config(config_path)
+                print(f"\nA sample configuration file has been created: {config_path}")
                 print("Edit this file and run the script again.")
                 sys.exit(1)
         else:
             sys.exit(1)
     else:
-        config_file = sys.argv[1]
+        # If config file path is given but not absolute, make it relative to script directory
+        if not os.path.isabs(sys.argv[1]):
+            config_file = os.path.join(script_dir, sys.argv[1])
+        else:
+            config_file = sys.argv[1]
+
+        # Check if the specified config file exists
+        if not os.path.exists(config_file):
+            print(f"Error: Config file not found: {config_file}")
+            sys.exit(1)
 
     # Load the config file
     config = load_config(config_file)
