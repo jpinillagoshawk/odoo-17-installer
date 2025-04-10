@@ -937,28 +937,61 @@ initialize_database() {
     echo -e "${YELLOW}Waiting for services to start...${RESET}"
     sleep 10
 
-    # Create the first database using Odoo's API
-    echo -e "${CYAN}Creating initial database...${RESET}"
-    curl -s -X POST \
-        -H "Content-Type: application/json" \
-        -d '{
-            "jsonrpc": "2.0",
-            "method": "call",
-            "params": {
-                "master_pwd": "'$ADMIN_PASS'",
-                "name": "'$DB_NAME'",
-                "login": "admin",
-                "password": "'$ADMIN_PASS'",
-                "lang": "en_US",
-                "country_code": "es"
-            }
-        }' \
-        http://localhost:8069/web/database/create > /dev/null
+    # Check if database already exists
+    if docker exec $DB_CONTAINER psql -U $DB_USER -lqt | grep -q $DB_NAME; then
+        log INFO "Database $DB_NAME already exists"
+        echo -e "${YELLOW}Database $DB_NAME already exists. Checking if it's initialized...${RESET}"
+        
+        # Check if it's initialized (has ir_module_module table)
+        if docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT 1 FROM information_schema.tables WHERE table_name = 'ir_module_module'" | grep -q "1"; then
+            log INFO "Database is already initialized"
+            echo -e "${GREEN}${BOLD}✓${RESET} Database is already initialized"
+            return 0
+        fi
+    fi
 
-    validate "Database creation" "curl -s http://localhost:8069/web/database/selector" "Failed to create database"
+    # Explicitly initialize the database using Odoo command line
+    log INFO "Initializing database using Odoo command line..."
+    echo -e "${CYAN}Initializing database with Odoo base module...${RESET}"
+    
+    docker exec $CONTAINER_NAME odoo --stop-after-init --init=base -d $DB_NAME --db_host=db --db_user=$DB_USER --db_password=$DB_PASS
+    
+    if [ $? -ne 0 ]; then
+        # Try alternative approach with database creation API
+        log WARNING "Command line initialization failed, trying API approach..."
+        echo -e "${YELLOW}Command line initialization failed, trying alternative approach...${RESET}"
+        
+        # Create the first database using Odoo's API
+        echo -e "${CYAN}Creating initial database via API...${RESET}"
+        curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{
+                "jsonrpc": "2.0",
+                "method": "call",
+                "params": {
+                    "master_pwd": "'$ADMIN_PASS'",
+                    "name": "'$DB_NAME'",
+                    "login": "admin",
+                    "password": "'$ADMIN_PASS'",
+                    "lang": "en_US",
+                    "country_code": "es"
+                }
+            }' \
+            http://localhost:8069/web/database/create > /dev/null
+    fi
+
+    # Verify initialization
+    if ! docker exec $DB_CONTAINER psql -U $DB_USER -d $DB_NAME -c "SELECT COUNT(*) FROM ir_module_module WHERE state = 'installed'" -t 2>/dev/null | grep -q '[1-9]'; then
+        log ERROR "Database initialization failed"
+        echo -e "${RED}${BOLD}⚠ Database initialization failed${RESET}"
+        echo -e "${YELLOW}You can try manual initialization with:${RESET}"
+        echo -e "${YELLOW}docker exec $CONTAINER_NAME odoo --stop-after-init --init=base -d $DB_NAME${RESET}"
+        return 1
+    fi
 
     log INFO "Database initialized and ready to use"
     echo -e "${GREEN}${BOLD}✓${RESET} Database initialized successfully"
+    return 0
 }
 
 # Check service health

@@ -170,7 +170,7 @@ cleanup_and_restart() {
         -e USER=$DB_USER \
         -e PASSWORD={client_password} \
         -e PROXY_MODE=True \
-        odoo:17.0 -- --init=base -d $DB_NAME
+        odoo:17.0
 
     # If backup failed, remove the partial backup file and clean temporary filestore
     if [ "$failed" = true ]; then
@@ -278,7 +278,8 @@ restore_backup() {
         sed -i "s/container_name: odoo17-[a-zA-Z0-9_-]*/container_name: odoo17-$detected_client_name/" docker-compose.yml
         sed -i "s/container_name: db-[a-zA-Z0-9_-]*/container_name: db-$detected_client_name/" docker-compose.yml
         sed -i "s/POSTGRES_DB=postgres_[a-zA-Z0-9_-]*/POSTGRES_DB=$DETECTED_DB_NAME/" docker-compose.yml
-        sed -i "s/command: -- --init=base -d postgres_[a-zA-Z0-9_-]*/command: -- --init=base -d $DETECTED_DB_NAME/" docker-compose.yml 2>/dev/null || true
+        # Remove any init parameters if they exist
+        sed -i "s/command: -- --init=base -d postgres_[a-zA-Z0-9_-]*/command:/" docker-compose.yml 2>/dev/null || true
 
         echo "Updating odoo.conf..."
         sed -i "s/db_name = postgres_[a-zA-Z0-9_-]*/db_name = $DETECTED_DB_NAME/" config/odoo.conf 2>/dev/null || true
@@ -360,7 +361,7 @@ restore_backup() {
         -e USER=$DB_USER \
         -e PASSWORD={client_password} \
         -e PROXY_MODE=True \
-        odoo:17.0 -- --init=base -d $DB_NAME
+        odoo:17.0
 
     # Wait for services to be ready
     echo "Waiting for services to start..."
