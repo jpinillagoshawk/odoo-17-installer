@@ -1157,7 +1157,7 @@ initialize_database() {
     DOCKER_NETWORK=$(docker inspect "$DB_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{end}}')
     DEBUG "Using Docker network: $DOCKER_NETWORK"
     
-    # Get the POSTGRES_USER from container environment
+    # Get the POSTGRES_USER from container environment - this is the PostgreSQL admin user
     DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
     INFO "Using database admin user: $DB_ADMIN_USER"
     
@@ -1194,6 +1194,10 @@ initialize_database() {
         return 1
     fi
     
+    # IMPORTANT: Use Linux user 'postgres' for all psql commands, but specify the DB user with -U
+    # This fixes the "no matching entries in passwd file" error
+    LINUX_USER="postgres"
+    
     # Ensure the odoo user's password matches the POSTGRES_PASSWORD
     echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
     INFO "Checking if database user '$DB_USER' exists..."
@@ -1206,8 +1210,8 @@ initialize_database() {
     DEBUG "Executing query: $user_query"
     USER_EXISTS=""
     
-    # Try with timeout to prevent hanging
-    USER_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -tAc "$user_query" 2>/dev/null || echo "ERROR")
+    # Try with timeout to prevent hanging - use postgres Linux user but check for DB_USER
+    USER_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -tAc "$user_query" 2>/dev/null || echo "ERROR")
     
     if [ "$USER_EXISTS" = "ERROR" ]; then
         WARNING "Error or timeout when checking if user exists. Will assume user does not exist."
@@ -1221,8 +1225,8 @@ initialize_database() {
         echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
         INFO "Creating database user $DB_USER..."
         
-        # Try to create user with timeout
-        USER_CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+        # Try to create user with timeout - using Linux user postgres
+        USER_CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         USER_CREATE_STATUS=$?
         
         if [ $USER_CREATE_STATUS -ne 0 ]; then
@@ -1238,8 +1242,8 @@ initialize_database() {
         echo -e "${YELLOW}Setting password for existing user $DB_USER...${RESET}"
         INFO "Setting password for existing user $DB_USER..."
         
-        # Try to update password with timeout
-        PASS_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+        # Try to update password with timeout - using Linux user postgres
+        PASS_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         PASS_UPDATE_STATUS=$?
         
         if [ $PASS_UPDATE_STATUS -ne 0 ]; then
@@ -1260,8 +1264,8 @@ initialize_database() {
     echo -e "${YELLOW}Preparing database: Checking for existing database...${RESET}"
     INFO "Checking if database '$DB_NAME' exists..."
     
-    # Check if the database exists using a more reliable method with timeout
-    DB_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>/dev/null || echo "ERROR")
+    # Check if the database exists using a more reliable method with timeout - using Linux user postgres
+    DB_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>/dev/null || echo "ERROR")
     
     if [ "$DB_EXISTS" = "ERROR" ]; then
         WARNING "Error or timeout when checking if database exists. Will assume it does not exist."
@@ -1275,8 +1279,8 @@ initialize_database() {
         echo -e "${YELLOW}Database '$DB_NAME' exists. Terminating connections and dropping database...${RESET}"
         INFO "Database '$DB_NAME' exists. Terminating connections first..."
         
-        # Terminate existing connections with timeout
-        TERM_RESULT=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1)
+        # Terminate existing connections with timeout - using Linux user postgres
+        TERM_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1)
         TERM_STATUS=$?
         
         if [ $TERM_STATUS -ne 0 ]; then
@@ -1288,8 +1292,8 @@ initialize_database() {
             INFO "Database connections terminated successfully"
         fi
         
-        # Drop the database with timeout
-        DROP_RESULT=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
+        # Drop the database with timeout - using Linux user postgres
+        DROP_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
         DROP_STATUS=$?
         
         if [ $DROP_STATUS -ne 0 ]; then
@@ -1302,11 +1306,11 @@ initialize_database() {
         fi
     fi
     
-    # Create new database with timeout
+    # Create new database with timeout - using Linux user postgres
     echo -e "${YELLOW}Creating new database '$DB_NAME'...${RESET}"
     INFO "Creating new database '$DB_NAME'..."
     
-    CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
+    CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
     CREATE_STATUS=$?
     
     if [ $CREATE_STATUS -ne 0 ]; then
@@ -1318,8 +1322,8 @@ initialize_database() {
         INFO "Database created successfully"
     fi
     
-    # Verify database was created successfully
-    VERIFY_DB=$(${TIMEOUT_CMD} docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -lqt | grep -w "$DB_NAME" | wc -l)
+    # Verify database was created successfully - using Linux user postgres
+    VERIFY_DB=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -lqt | grep -w "$DB_NAME" | wc -l)
     if [ "$VERIFY_DB" -ge 1 ]; then
         echo -e "${GREEN}Database '$DB_NAME' verification successful${RESET}"
         INFO "Database '$DB_NAME' verification successful"
