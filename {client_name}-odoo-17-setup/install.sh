@@ -752,8 +752,21 @@ create_directories() {
 
     # Create the necessary files to make addons directory a valid Odoo addon path
     log INFO "Creating necessary files for addons directory..."
-    # Just create an empty __init__.py file to make it a valid Python module
-    touch "$INSTALL_DIR/addons/__init__.py"
+    
+    # Create a proper module structure to make the addons directory valid for Odoo
+    mkdir -p "$INSTALL_DIR/addons/empty_module"
+    echo '# -*- coding: utf-8 -*-' > "$INSTALL_DIR/addons/empty_module/__init__.py"
+    cat > "$INSTALL_DIR/addons/empty_module/__manifest__.py" << EOF
+{
+    'name': 'Empty Module',
+    'version': '1.0',
+    'category': 'Hidden',
+    'description': """Empty module to make addons path valid.""",
+    'depends': ['base'],
+    'installable': True,
+    'auto_install': False,
+}
+EOF
     
     # Create a simple README file explaining the purpose of this directory
     cat > "$INSTALL_DIR/addons/README.md" << EOF
@@ -766,7 +779,7 @@ Each module should be in its own subdirectory with at least:
 - __init__.py
 - __manifest__.py
 EOF
-    log INFO "Created initialization files for addons directory"
+    log INFO "Created empty module to properly initialize addons directory"
 
     # Set correct ownership and permissions
     chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data" "$INSTALL_DIR/volumes/postgres-data" "$INSTALL_DIR/logs" 2>/dev/null || true
@@ -792,7 +805,6 @@ cleanup_temporary_files() {
     # List of temporary files and directories to clean up
     local TEMP_FILES=(
         "$INSTALL_DIR/docker-compose.yml.bak"
-        "$INSTALL_DIR/addons/__init__.py"
     )
     
     # Remove each temporary file if it exists
@@ -802,6 +814,13 @@ cleanup_temporary_files() {
             log INFO "Removed temporary file: $file"
         fi
     done
+    
+    # Remove the empty module - it's only needed during initial setup
+    if [ -d "$INSTALL_DIR/addons/empty_module" ]; then
+        rm -rf "$INSTALL_DIR/addons/empty_module"
+        log INFO "Removed temporary empty_module from addons directory"
+        echo -e "${GREEN}Removed temporary empty_module from addons directory${RESET}"
+    fi
     
     log INFO "Temporary files cleanup completed"
     echo -e "${GREEN}${BOLD}✓${RESET} Temporary files cleaned up"
@@ -1163,8 +1182,8 @@ initialize_database() {
     while [ $pg_ready_attempts -lt $max_pg_ready_attempts ]; do
         if docker exec "$DB_CONTAINER" pg_isready -U "$DB_ADMIN_USER" -h localhost -q; then
             INFO "PostgreSQL is ready to accept connections"
-            break
-        fi
+                break
+            fi
         pg_ready_attempts=$((pg_ready_attempts + 1))
         INFO "Waiting for PostgreSQL to be ready (attempt $pg_ready_attempts/$max_pg_ready_attempts)..."
         sleep 2
@@ -1265,7 +1284,7 @@ initialize_database() {
     if [ $CREATE_STATUS -ne 0 ]; then
         ERROR "Failed to create database: $CREATE_RESULT"
         echo -e "${RED}Failed to create database: $CREATE_RESULT${RESET}"
-        return 1
+    return 1
     else
         echo -e "${GREEN}Database created successfully${RESET}"
         INFO "Database created successfully"
