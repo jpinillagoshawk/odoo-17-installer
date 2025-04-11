@@ -1679,10 +1679,10 @@ ensure_enterprise_modules() {
                 echo -e "${CYAN}Copying enterprise modules directly into container...${RESET}"
                 
                 # Create the enterprise directory in container if it doesn't exist
-                docker exec $CONTAINER_NAME mkdir -p /mnt/enterprise || {
+                docker exec -u 0 $CONTAINER_NAME mkdir -p /mnt/enterprise || {
                     echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
                     wait_for_container $CONTAINER_NAME 20 3
-                    docker exec $CONTAINER_NAME mkdir -p /mnt/enterprise
+                    docker exec -u 0 $CONTAINER_NAME mkdir -p /mnt/enterprise
                 }
                 
                 # Copy all enterprise modules with retry
@@ -1719,10 +1719,10 @@ ensure_enterprise_modules() {
                 echo -e "${CYAN}Copying odoo.conf directly into container...${RESET}"
                 
                 # Create the config directory in container if it doesn't exist
-                docker exec $CONTAINER_NAME mkdir -p /etc/odoo || {
+                docker exec -u 0 $CONTAINER_NAME mkdir -p /etc/odoo || {
                     echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
                     wait_for_container $CONTAINER_NAME 20 3
-                    docker exec $CONTAINER_NAME mkdir -p /etc/odoo
+                    docker exec -u 0 $CONTAINER_NAME mkdir -p /etc/odoo
                 }
                 
                 # Check if host has odoo.conf and copy it
@@ -1748,7 +1748,7 @@ ensure_enterprise_modules() {
                         echo -e "${YELLOW}Creating odoo.conf directly in container...${RESET}"
                         
                         # Last resort - create config directly in container
-                        docker exec $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
+                        docker exec -u 0 $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
 [options]
 admin_passwd = {client_password}
 db_host = db
@@ -1771,7 +1771,7 @@ EOF'
                     fi
                 else
                     # Create odoo.conf directly in container if not found on host
-                    docker exec $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
+                    docker exec -u 0 $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
 [options]
 admin_passwd = {client_password}
 db_host = db
