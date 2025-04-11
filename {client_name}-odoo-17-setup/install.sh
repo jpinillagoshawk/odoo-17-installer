@@ -1177,7 +1177,7 @@ initialize_database() {
     DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
     INFO "Using database admin user: $DB_ADMIN_USER"
     
-    # Securely determine database password
+    # Securely determine database password - this will be the POSTGRES_PASSWORD from the container
     DB_WORKING_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
     if [ -z "$DB_WORKING_PASSWORD" ]; then
         # Fallback to container inspection and grep if printenv doesn't work
@@ -1188,9 +1188,9 @@ initialize_database() {
             return 1
         fi
     fi
-    DEBUG "Successfully retrieved database password for initialization"
+    DEBUG "Successfully retrieved database password for initialization: $DB_WORKING_PASSWORD"
     
-    # Set pg_password for use in later functions
+    # Set pg_password for use in later functions - CRITICAL that this is consistent
     pg_password="$DB_WORKING_PASSWORD"
     
     # Ensure PostgreSQL is ready to accept connections
@@ -1245,6 +1245,7 @@ initialize_database() {
         INFO "Creating database user $DB_USER..."
         
         # Try to create user with timeout - using Linux user postgres but specifying DB_ADMIN_USER as PostgreSQL user
+        # IMPORTANT: Use the exact same password as the admin password to avoid authentication issues
         USER_CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         USER_CREATE_STATUS=$?
         
@@ -1262,7 +1263,8 @@ initialize_database() {
         INFO "Updating database user $DB_USER password..."
         
         # Try to update user password with timeout - using Linux user postgres but specifying DB_ADMIN_USER
-        PASSWORD_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD'; ALTER USER $DB_USER WITH SUPERUSER;" 2>&1)
+        # IMPORTANT: Use the exact same password as the admin password to avoid authentication issues
+        PASSWORD_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
         PASSWORD_UPDATE_STATUS=$?
         
         if [ $PASSWORD_UPDATE_STATUS -ne 0 ]; then
@@ -1273,6 +1275,17 @@ initialize_database() {
         else
             echo -e "${GREEN}Database user $DB_USER password updated successfully${RESET}"
             INFO "Database user $DB_USER password updated successfully"
+        fi
+        
+        # Make odoo user a superuser in a separate command to avoid failures if it's already superuser
+        SUPERUSER_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH SUPERUSER;" 2>&1)
+        SUPERUSER_UPDATE_STATUS=$?
+        
+        if [ $SUPERUSER_UPDATE_STATUS -ne 0 ]; then
+            WARNING "Failed to set superuser status for $DB_USER: $SUPERUSER_UPDATE_RESULT"
+            echo -e "${YELLOW}Note: Failed to set superuser status - this may not be critical${RESET}"
+        else
+            INFO "Set superuser status for $DB_USER"
         fi
     fi
     
@@ -1336,6 +1349,21 @@ initialize_database() {
         INFO "Database created successfully"
     fi
     
+    # Grant all privileges on database to odoo user
+    echo -e "${YELLOW}Ensuring $DB_USER has full privileges on $DB_NAME...${RESET}"
+    INFO "Ensuring $DB_USER has full privileges on $DB_NAME..."
+    
+    GRANT_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>&1)
+    GRANT_STATUS=$?
+    
+    if [ $GRANT_STATUS -ne 0 ]; then
+        WARNING "Failed to grant privileges: $GRANT_RESULT"
+        echo -e "${YELLOW}Failed to grant privileges - not critical if user is superuser${RESET}"
+    else
+        echo -e "${GREEN}Privileges granted successfully${RESET}"
+        INFO "Privileges granted successfully"
+    fi
+    
     # Verify database was created successfully - using Linux user postgres but specifying DB_ADMIN_USER
     VERIFY_DB=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -lqt | grep -w "$DB_NAME" | wc -l)
     if [ "$VERIFY_DB" -ge 1 ]; then
@@ -1345,6 +1373,22 @@ initialize_database() {
         WARNING "Could not verify database '$DB_NAME' exists, but will continue anyway"
         echo -e "${YELLOW}Could not verify database exists, but will continue anyway${RESET}"
     fi
+    
+    # Set environment variables in Odoo container to ensure consistent credentials
+    echo -e "${YELLOW}Setting database credentials in Odoo container...${RESET}"
+    INFO "Setting database credentials in Odoo container..."
+    
+    if ! docker exec -u 0 $CONTAINER_NAME sh -c "echo 'DB_PASSWORD=$DB_WORKING_PASSWORD' >> /etc/environment"; then
+        WARNING "Failed to set DB_PASSWORD in container environment"
+        echo -e "${YELLOW}Failed to set database password in container environment${RESET}"
+    else
+        INFO "Set DB_PASSWORD in container environment"
+    fi
+    
+    # Export variables to be used in docker-compose environment
+    echo -e "${YELLOW}Exporting database credentials to script environment...${RESET}"
+    INFO "Exporting database credentials to script environment..."
+    export DB_PASSWORD="$DB_WORKING_PASSWORD"
     
     # NEW ADDITION: Initialize Odoo schema in the database
     echo -e "${YELLOW}Initializing Odoo database schema...${RESET}"
@@ -1370,10 +1414,15 @@ initialize_database() {
     docker compose stop web
     sleep 5
     
-    # Initialize the database schema - use Odoo's odoo user for this operation
+    # Initialize the database schema - use explicit environment variables to ensure password is correct
     echo -e "${YELLOW}Running Odoo database initialization...${RESET}"
     INFO "Running Odoo database initialization..."
-    ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK -e DB_HOST=db -e DB_PORT=5432 -e DB_USER=$DB_USER -e DB_PASSWORD=$DB_WORKING_PASSWORD -e DB_NAME=$DB_NAME odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http 2>&1)
+    ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
+                        -e HOST=db \
+                        -e PORT=5432 \
+                        -e USER=$DB_USER \
+                        -e PASSWORD=$DB_WORKING_PASSWORD \
+                        odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http 2>&1)
     ODOO_INIT_STATUS=$?
     
     if [ $ODOO_INIT_STATUS -ne 0 ]; then
@@ -1387,11 +1436,21 @@ initialize_database() {
         
         # Start the container in a way that doesn't conflict with port 8069
         cd "$INSTALL_DIR"
+        
+        # Add database credentials to the docker-compose environment
+        echo -e "DB_PASSWORD=$DB_WORKING_PASSWORD" > .env
+        echo -e "POSTGRES_PASSWORD=$DB_WORKING_PASSWORD" >> .env
+        
         docker compose up -d web
         sleep 10
         
-        # Run the initialization command in the running container
-        ODOO_INIT_RETRY=$(docker exec -e DB_HOST=db -e DB_PORT=5432 -e DB_USER=$DB_USER -e DB_PASSWORD=$DB_WORKING_PASSWORD -e DB_NAME=$DB_NAME $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
+        # Run the initialization command in the running container with explicit credentials
+        ODOO_INIT_RETRY=$(docker exec \
+                         -e DB_HOST=db \
+                         -e DB_PORT=5432 \
+                         -e DB_USER=$DB_USER \
+                         -e DB_PASSWORD=$DB_WORKING_PASSWORD \
+                         $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
         ODOO_INIT_RETRY_STATUS=$?
         
         if [ $ODOO_INIT_RETRY_STATUS -ne 0 ]; then
@@ -1411,6 +1470,11 @@ initialize_database() {
     echo -e "${YELLOW}Restarting Odoo service...${RESET}"
     INFO "Restarting Odoo service..."
     cd "$INSTALL_DIR"
+    
+    # Add database credentials to the docker-compose environment
+    echo -e "DB_PASSWORD=$DB_WORKING_PASSWORD" > .env
+    echo -e "POSTGRES_PASSWORD=$DB_WORKING_PASSWORD" >> .env
+    
     docker compose up -d web
     sleep 10
     
