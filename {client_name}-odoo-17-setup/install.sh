@@ -1173,6 +1173,10 @@ initialize_database() {
     DOCKER_NETWORK=$(docker inspect "$DB_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{end}}')
     DEBUG "Using Docker network: $DOCKER_NETWORK"
     
+    # Print network details for debugging
+    echo -e "${YELLOW}INFO: Docker network details:${RESET}"
+    docker network inspect "$DOCKER_NETWORK" | grep -A 5 "Name"
+    
     # Get the POSTGRES_USER from container environment - this is the PostgreSQL admin user
     DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
     INFO "Using database admin user: $DB_ADMIN_USER"
@@ -1441,70 +1445,93 @@ initialize_database() {
     docker compose stop web
     sleep 5
     
+     # Print database environment variables for debugging
+    echo -e "${YELLOW}INFO: Database environment variables:${RESET}"
+    docker exec "$DB_CONTAINER" env | grep -E "POSTGRES|DB_" || echo "No relevant environment variables found"
+
     # Initialize the database schema - use explicit environment variables to ensure password is correct
     echo -e "${YELLOW}Running Odoo database initialization...${RESET}"
     INFO "Running Odoo database initialization..."
     
+    # Explicitly display the exact command we're going to run
+    echo -e "${YELLOW}DEBUG: Running schema initialization with:${RESET}"
+    echo -e "${YELLOW}  Network: $DOCKER_NETWORK${RESET}"
+    echo -e "${YELLOW}  Host: $DB_CONTAINER${RESET}"
+    echo -e "${YELLOW}  User: $DB_USER${RESET}"
+    echo -e "${YELLOW}  Database: $DB_NAME${RESET}"
+    
     # Use the exact parameters that worked in manual testing
     # IMPORTANT: Use the container name directly for HOST, not 'db'
-    ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
-                        -e HOST=$DB_CONTAINER \
-                        -e PORT=5432 \
-                        -e USER=$DB_USER \
-                        -e PASSWORD=$DB_WORKING_PASSWORD \
-                        odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http 2>&1)
+    INIT_CMD="docker run --rm --network=$DOCKER_NETWORK \
+              -e HOST=$DB_CONTAINER \
+              -e PORT=5432 \
+              -e USER=$DB_USER \
+              -e PASSWORD=$DB_WORKING_PASSWORD \
+              odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http"
+    
+    echo -e "${YELLOW}DEBUG: Command (redacted password):${RESET}"
+    echo "${INIT_CMD//$DB_WORKING_PASSWORD/******}"
+    
+    # Execute the command
+    ODOO_INIT_RESULT=$(eval "$INIT_CMD" 2>&1)
     ODOO_INIT_STATUS=$?
     
     if [ $ODOO_INIT_STATUS -ne 0 ]; then
-        WARNING "Odoo initialization using container name may have failed, trying with network service name"
+        WARNING "Odoo initialization using container name failed: $ODOO_INIT_RESULT"
         echo -e "${YELLOW}Warning: First initialization method failed, trying with network service name...${RESET}"
         
-        # Try again using the service name from docker-compose
-        ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
-                          -e HOST=db \
-                          -e PORT=5432 \
-                          -e USER=$DB_USER \
-                          -e PASSWORD=$DB_WORKING_PASSWORD \
-                          odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http 2>&1)
-        ODOO_INIT_STATUS=$?
+        # Try the exact command that worked for the user manually
+        CONTAINER_NETWORK="vissecapital-odoo-17_default" # This is hardcoded based on the user's working command
+        echo -e "${YELLOW}DEBUG: Trying hardcoded network and values that worked manually:${RESET}"
         
-        if [ $ODOO_INIT_STATUS -ne 0 ]; then
-            WARNING "Odoo initialization may have failed: $ODOO_INIT_RESULT"
-            echo -e "${YELLOW}Warning: Second initialization method also failed, trying with existing container...${RESET}"
-            
-            # Try using the existing container
-            echo -e "${YELLOW}Trying alternative initialization method...${RESET}"
-            INFO "Trying alternative initialization method with existing container..."
-            
-            # Start the container in a way that doesn't conflict with port 8069
-            cd "$INSTALL_DIR"
-            docker compose up -d web
-            sleep 10
-            
-            # Run the initialization command in the running container with explicit credentials
-            ODOO_INIT_RETRY=$(docker exec \
-                             -e DB_HOST=db \
-                             -e DB_PORT=5432 \
-                             -e DB_USER=$DB_USER \
-                             -e DB_PASSWORD=$DB_WORKING_PASSWORD \
-                             $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
-            ODOO_INIT_RETRY_STATUS=$?
-            
-            if [ $ODOO_INIT_RETRY_STATUS -ne 0 ]; then
-                ERROR "Alternative Odoo initialization failed: $ODOO_INIT_RETRY"
-                echo -e "${RED}Alternative Odoo initialization also failed${RESET}"
-                echo -e "${YELLOW}Will verify if schema was created anyway...${RESET}"
-            else
-                echo -e "${GREEN}Alternative Odoo initialization completed successfully${RESET}"
-                INFO "Alternative Odoo initialization completed successfully"
-            fi
+        MANUAL_CMD="docker run --rm --network=$CONTAINER_NETWORK \
+                   -e HOST=$DB_CONTAINER \
+                   -e PORT=5432 \
+                   -e USER=odoo \
+                   -e PASSWORD=$DB_WORKING_PASSWORD \
+                   odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http"
+        
+        echo -e "${YELLOW}DEBUG: Manual command (redacted password):${RESET}"
+        echo "${MANUAL_CMD//$DB_WORKING_PASSWORD/******}"
+        
+        # Execute the manual command
+        ODOO_INIT_RESULT=$(eval "$MANUAL_CMD" 2>&1)
+        ODOO_INIT_STATUS=$?
+    fi
+    
+    if [ $ODOO_INIT_STATUS -ne 0 ]; then
+        WARNING "Odoo initialization may have failed: $ODOO_INIT_RESULT"
+        echo -e "${YELLOW}Warning: Second initialization method also failed, trying with existing container...${RESET}"
+        
+        # Try using the existing container
+        echo -e "${YELLOW}Trying alternative initialization method...${RESET}"
+        INFO "Trying alternative initialization method with existing container..."
+        
+        # Start the container in a way that doesn't conflict with port 8069
+        cd "$INSTALL_DIR"
+        docker compose up -d web
+        sleep 10
+        
+        # Run the initialization command in the running container with explicit credentials
+        ODOO_INIT_RETRY=$(docker exec \
+                         -e DB_HOST=db \
+                         -e DB_PORT=5432 \
+                         -e DB_USER=$DB_USER \
+                         -e DB_PASSWORD=$DB_WORKING_PASSWORD \
+                         $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
+        ODOO_INIT_RETRY_STATUS=$?
+        
+        if [ $ODOO_INIT_RETRY_STATUS -ne 0 ]; then
+            ERROR "Alternative Odoo initialization failed: $ODOO_INIT_RETRY"
+            echo -e "${RED}Alternative Odoo initialization also failed${RESET}"
+            echo -e "${YELLOW}Will verify if schema was created anyway...${RESET}"
         else
-            echo -e "${GREEN}Odoo schema initialization completed successfully with container name${RESET}"
-            INFO "Odoo schema initialization completed successfully with container name"
+            echo -e "${GREEN}Alternative Odoo initialization completed successfully${RESET}"
+            INFO "Alternative Odoo initialization completed successfully"
         fi
     else
-        echo -e "${GREEN}Odoo schema initialization completed successfully${RESET}"
-        INFO "Odoo schema initialization completed successfully"
+        echo -e "${GREEN}Odoo schema initialization completed successfully with container name${RESET}"
+        INFO "Odoo schema initialization completed successfully with container name"
     fi
     
     # Restart Odoo
@@ -1583,7 +1610,7 @@ check_service_health() {
         # Try authentication with pg_password
         if ! docker exec -e PGPASSWORD="$pg_password" $DB_CONTAINER psql -h localhost -U $DB_USER -c "SELECT 1" >/dev/null 2>&1; then
             log WARNING "Testing fallback passwords for service check"
-            local test_passwords=("epitanen" "odoo" "postgres")
+            local test_passwords=("$DB_PASS" "odoo" "postgres")
             for test_pass in "${test_passwords[@]}"; do
                 if docker exec -e PGPASSWORD="$test_pass" $DB_CONTAINER psql -h localhost -U $DB_USER -c "SELECT 1" >/dev/null 2>&1; then
                     log WARNING "Using fallback password for service check"
