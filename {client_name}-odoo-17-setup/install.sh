@@ -1444,8 +1444,11 @@ initialize_database() {
     # Initialize the database schema - use explicit environment variables to ensure password is correct
     echo -e "${YELLOW}Running Odoo database initialization...${RESET}"
     INFO "Running Odoo database initialization..."
+    
+    # Use the exact parameters that worked in manual testing
+    # IMPORTANT: Use the container name directly for HOST, not 'db'
     ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
-                        -e HOST=db \
+                        -e HOST=$DB_CONTAINER \
                         -e PORT=5432 \
                         -e USER=$DB_USER \
                         -e PASSWORD=$DB_WORKING_PASSWORD \
@@ -1453,12 +1456,12 @@ initialize_database() {
     ODOO_INIT_STATUS=$?
     
     if [ $ODOO_INIT_STATUS -ne 0 ]; then
-        WARNING "Odoo initialization using network name may have failed, trying with container name"
-        echo -e "${YELLOW}Warning: First initialization method failed, trying with container name...${RESET}"
+        WARNING "Odoo initialization using container name may have failed, trying with network service name"
+        echo -e "${YELLOW}Warning: First initialization method failed, trying with network service name...${RESET}"
         
-        # Try again using the container hostname
+        # Try again using the service name from docker-compose
         ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
-                          -e HOST=$DB_CONTAINER \
+                          -e HOST=db \
                           -e PORT=5432 \
                           -e USER=$DB_USER \
                           -e PASSWORD=$DB_WORKING_PASSWORD \
