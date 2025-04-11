@@ -810,16 +810,32 @@ cleanup_temporary_files() {
     # Remove each temporary file if it exists
     for file in "${TEMP_FILES[@]}"; do
         if [ -f "$file" ]; then
-            rm -f "$file"
-            log INFO "Removed temporary file: $file"
+            if ! rm -f "$file"; then
+                log WARNING "Failed to remove temporary file: $file - permission issue"
+                echo -e "${YELLOW}Could not remove temporary file: $file${RESET}"
+            else
+                log INFO "Removed temporary file: $file"
+            fi
         fi
     done
     
     # Remove the empty module - it's only needed during initial setup
     if [ -d "$INSTALL_DIR/addons/empty_module" ]; then
-        rm -rf "$INSTALL_DIR/addons/empty_module"
-        log INFO "Removed temporary empty_module from addons directory"
-        echo -e "${GREEN}Removed temporary empty_module from addons directory${RESET}"
+        if ! rm -rf "$INSTALL_DIR/addons/empty_module"; then
+            log WARNING "Failed to remove temporary empty_module - permission issue"
+            echo -e "${YELLOW}Could not remove temporary module from addons directory${RESET}"
+        else
+            log INFO "Removed temporary empty_module from addons directory"
+            echo -e "${GREEN}Removed temporary empty_module from addons directory${RESET}"
+        fi
+    fi
+    
+    # Set proper permissions on the logs directory to ensure it's writable
+    if ! chmod -R 777 "$INSTALL_DIR/logs" 2>/dev/null; then
+        log WARNING "Failed to set permissions on logs directory - may affect logging"
+        echo -e "${YELLOW}Could not set proper permissions on logs directory${RESET}"
+    else
+        log INFO "Set proper permissions on logs directory"
     fi
     
     log INFO "Temporary files cleanup completed"
@@ -1607,255 +1623,168 @@ ensure_enterprise_modules() {
     log INFO "Ensuring enterprise modules are properly configured..."
     echo -e "${CYAN}Configuring enterprise modules...${RESET}"
 
-    # Get the working password from initialization
-    local pg_password=$DB_WORKING_PASSWORD
-    if [ -z "$pg_password" ]; then
-        pg_password=$DB_PASS
-        # Try to get password from container if not set
-        local container_password=$(docker exec $DB_CONTAINER printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
-        if [ -n "$container_password" ]; then
-            pg_password=$container_password
-        fi
+    # Check if config directory contains odoo.conf template
+    if [ ! -f "$INSTALL_DIR/config/odoo.conf" ]; then
+        log ERROR "Missing odoo.conf template in $INSTALL_DIR/config/"
+        echo -e "${RED}Missing odoo.conf template in config directory. Installation may not work properly.${RESET}"
+    else
+        log INFO "Found odoo.conf template in config directory"
     fi
-    
-    # Fix for mounting issues - copy all required files directly
-    log INFO "Checking for mount issues and fixing all required files"
-    echo -e "${CYAN}Checking for Docker mount issues and applying fixes...${RESET}"
-    
-    # 1. First check enterprise directory
-    local enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
-    local host_enterprise_files=$(ls -1A "$INSTALL_DIR/enterprise/" 2>/dev/null | wc -l || echo "0")
-    
-    # 2. Check config directory
+
+    # Check for SELinux enforcement which may affect permissions
+    if command -v getenforce &>/dev/null && [ "$(getenforce)" = "Enforcing" ]; then
+        log WARNING "SELinux is in enforcing mode, which may affect container volume permissions"
+        echo -e "${YELLOW}SELinux is enforcing - this may affect volume mounts. Consider using :z in your Docker volume mounts.${RESET}"
+    fi
+
+    # Check if the odoo.conf is properly mounted in the container
     local config_found=$(docker exec $CONTAINER_NAME ls -1A /etc/odoo 2>/dev/null | grep -c "odoo.conf" || echo "0")
     
-    # If any mount issues are detected, apply comprehensive fix
-    if [ "$enterprise_files" -lt 5 ] || [ "$config_found" -eq 0 ]; then
-        log WARNING "Detected Docker volume mount issues"
-        echo -e "${YELLOW}${BOLD}⚠ Docker volume mount issues detected. Applying comprehensive fix...${RESET}"
+    if [ "$config_found" -eq 0 ]; then
+        log WARNING "odoo.conf not found in container, copying template"
+        echo -e "${YELLOW}odoo.conf not properly mounted in container, copying template...${RESET}"
         
-        # Stop containers for clean state
-        echo -e "${CYAN}Stopping containers to apply fixes...${RESET}"
-        cd "$INSTALL_DIR"
-        docker compose down
-        
-        # Create a backup of docker-compose.yml
-        cp docker-compose.yml docker-compose.yml.bak
-        
-        # Modify docker-compose.yml to use bind mounts with consistent directory paths
-        echo -e "${CYAN}Updating docker-compose.yml with absolute paths...${RESET}"
-        
-        # Use absolute paths for all volumes
-        local absolute_path=$(readlink -f "$INSTALL_DIR")
-        sed -i "s|./config:|$absolute_path/config:|g" docker-compose.yml
-        sed -i "s|./enterprise:|$absolute_path/enterprise:|g" docker-compose.yml
-        sed -i "s|./addons:|$absolute_path/addons:|g" docker-compose.yml
-        sed -i "s|./volumes:|$absolute_path/volumes:|g" docker-compose.yml
-        sed -i "s|./logs:|$absolute_path/logs:|g" docker-compose.yml
-        sed -i "s|./filestore:|$absolute_path/filestore:|g" docker-compose.yml
-        
-        # Remove any :ro flags that might cause issues
-        sed -i "s|:ro||g" docker-compose.yml
-        
-        # Restart containers with new config
-        echo -e "${CYAN}Starting containers with fixed configuration...${RESET}"
-        docker compose up -d
-        
-        # Wait for containers to fully start
-        echo -e "${YELLOW}Waiting for containers to initialize...${RESET}"
-        wait_for_container $CONTAINER_NAME 20 3
-        wait_for_container $DB_CONTAINER 10 2
-        
-        # Verify if mount issues are fixed
-        enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
-        config_found=$(docker exec $CONTAINER_NAME ls -1A /etc/odoo 2>/dev/null | grep -c "odoo.conf" || echo "0")
-        
-        if [ "$enterprise_files" -lt 5 ] || [ "$config_found" -eq 0 ]; then
-            log WARNING "Volume mount issues persist, trying direct file copy"
-            echo -e "${YELLOW}${BOLD}⚠ Mount issues persist after configuration update. Trying direct file copy...${RESET}"
-            
-            # Direct file copy approach for enterprise modules
-            if [ "$enterprise_files" -lt 5 ] && [ "$host_enterprise_files" -gt 5 ]; then
-                echo -e "${CYAN}Copying enterprise modules directly into container...${RESET}"
-                
-                # Create the enterprise directory in container if it doesn't exist
-                docker exec -u 0 $CONTAINER_NAME mkdir -p /mnt/enterprise || {
-                    echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
-                    wait_for_container $CONTAINER_NAME 20 3
-                    docker exec -u 0 $CONTAINER_NAME mkdir -p /mnt/enterprise
-                }
-                
-                # Copy all enterprise modules with retry
-                for dir in "$INSTALL_DIR/enterprise/"*/; do
-                    if [ -d "$dir" ]; then
-                        module_name=$(basename "$dir")
-                        echo -e "${YELLOW}Copying $module_name module...${RESET}"
-                        
-                        # Try to copy with retry logic
-                        local max_copy_attempts=3
-                        local copy_attempt=1
-                        local copy_success=false
-                        
-                        while [ $copy_attempt -le $max_copy_attempts ] && [ "$copy_success" = false ]; do
-                            if docker cp "$dir" "$CONTAINER_NAME:/mnt/enterprise/" 2>/dev/null; then
-                                copy_success=true
-                                echo -e "${GREEN}Successfully copied $module_name${RESET}"
-                            else
-                                echo -e "${YELLOW}Copy attempt $copy_attempt failed, waiting for container...${RESET}"
-                                wait_for_container $CONTAINER_NAME 10 3
-                                copy_attempt=$((copy_attempt + 1))
-                            fi
-                        done
-                        
-                        if [ "$copy_success" = false ]; then
-                            echo -e "${RED}Failed to copy $module_name after $max_copy_attempts attempts${RESET}"
-                        fi
-                    fi
-                done
-            fi
-            
-            # Direct file copy for odoo.conf
-            if [ "$config_found" -eq 0 ]; then
-                echo -e "${CYAN}Copying odoo.conf directly into container...${RESET}"
-                
-                # Create the config directory in container if it doesn't exist
-                docker exec -u 0 $CONTAINER_NAME mkdir -p /etc/odoo || {
-                    echo -e "${YELLOW}Container not ready, waiting and trying again...${RESET}"
-                    wait_for_container $CONTAINER_NAME 20 3
-                    docker exec -u 0 $CONTAINER_NAME mkdir -p /etc/odoo
-                }
-                
-                # Check if host has odoo.conf and copy it
-                if [ -f "$INSTALL_DIR/config/odoo.conf" ]; then
-                    # Try to copy with retry logic
-                    local max_conf_attempts=3
-                    local conf_attempt=1
-                    local conf_success=false
-                    
-                    while [ $conf_attempt -le $max_conf_attempts ] && [ "$conf_success" = false ]; do
-                        if docker cp "$INSTALL_DIR/config/odoo.conf" "$CONTAINER_NAME:/etc/odoo/odoo.conf" 2>/dev/null; then
-                            conf_success=true
-                            echo -e "${GREEN}Successfully copied odoo.conf${RESET}"
-                        else
-                            echo -e "${YELLOW}Copy attempt $conf_attempt failed, waiting for container...${RESET}"
-                            wait_for_container $CONTAINER_NAME 10 3
-                            conf_attempt=$((conf_attempt + 1))
-                        fi
-                    done
-                    
-                    if [ "$conf_success" = false ]; then
-                        echo -e "${RED}Failed to copy odoo.conf after $max_conf_attempts attempts${RESET}"
-                        echo -e "${YELLOW}Creating odoo.conf directly in container...${RESET}"
-                        
-                        # Last resort - create config directly in container
-                        docker exec -u 0 $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
-[options]
-admin_passwd = {client_password}
-db_host = db
-db_port = {db_port}
-db_user = odoo
-db_password = {client_password}
-addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
-data_dir = /var/lib/odoo
-logfile = /var/log/odoo/odoo.log
-log_level = info
-max_cron_threads = 2
-workers = 4
-limit_memory_hard = 2684354560
-limit_memory_soft = 2147483648
-limit_request = 8192
-limit_time_cpu = 600
-limit_time_real = 1200
-proxy_mode = True
-EOF'
-                    fi
-                else
-                    # Create odoo.conf directly in container if not found on host
-                    docker exec -u 0 $CONTAINER_NAME bash -c 'cat > /etc/odoo/odoo.conf << EOF
-[options]
-admin_passwd = {client_password}
-db_host = db
-db_port = {db_port}
-db_user = odoo
-db_password = {client_password}
-addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
-data_dir = /var/lib/odoo
-logfile = /var/log/odoo/odoo.log
-log_level = info
-max_cron_threads = 2
-workers = 4
-limit_memory_hard = 2684354560
-limit_memory_soft = 2147483648
-limit_request = 8192
-limit_time_cpu = 600
-limit_time_real = 1200
-proxy_mode = True
-EOF'
-                fi
-            fi
-            
-            # Set permissions
-            echo -e "${CYAN}Setting correct permissions...${RESET}"
-            docker exec $CONTAINER_NAME chown -R odoo:odoo /mnt/enterprise /etc/odoo /mnt/extra-addons
-            
-            # Restart Odoo service to apply all changes
-            echo -e "${CYAN}Restarting Odoo service to apply changes...${RESET}"
-            docker compose restart web
-            echo -e "${YELLOW}Waiting for Odoo container to restart...${RESET}"
-            wait_for_container $CONTAINER_NAME 20 3
-            
-            # Final verification
-            enterprise_files=$(docker exec $CONTAINER_NAME ls -1A /mnt/enterprise 2>/dev/null | wc -l || echo "0")
-            config_found=$(docker exec $CONTAINER_NAME ls -1A /etc/odoo 2>/dev/null | grep -c "odoo.conf" || echo "0")
-            
-            if [ "$enterprise_files" -lt 5 ] || [ "$config_found" -eq 0 ]; then
-                log ERROR "Failed to fix mount issues with direct file copy"
-                echo -e "${RED}${BOLD}⚠ Could not fix all mount issues. Manual investigation required.${RESET}"
-                echo -e "${RED}Enterprise modules found: $enterprise_files, Config file found: $config_found${RESET}"
-                echo -e "${YELLOW}Try these troubleshooting steps:${RESET}"
-                echo -e "1. Inspect Docker volume permissions: ${YELLOW}docker volume inspect <volume-name>${RESET}"
-                echo -e "2. Check SELinux/AppArmor status if on Linux: ${YELLOW}getenforce${RESET} or ${YELLOW}aa-status${RESET}"
-                echo -e "3. Try completely recreating containers: ${YELLOW}cd $INSTALL_DIR && docker compose down -v && docker compose up -d${RESET}"
-            else
-                log INFO "Successfully fixed mount issues with direct file copy"
-                echo -e "${GREEN}${BOLD}✓${RESET} Successfully fixed mount issues!"
-                echo -e "${GREEN}Enterprise modules found: $enterprise_files, Config file found: $config_found${RESET}"
-            fi
+        # Ensure the /etc/odoo directory exists in the container
+        if ! docker exec -u 0 $CONTAINER_NAME mkdir -p /etc/odoo; then
+            log ERROR "Failed to create /etc/odoo directory in container"
+            echo -e "${RED}Failed to create config directory in container - permission issue${RESET}"
         else
-            log INFO "Mount issues fixed with configuration update"
-            echo -e "${GREEN}${BOLD}✓${RESET} Mount issues fixed with configuration update!"
-            echo -e "${GREEN}Enterprise modules found: $enterprise_files, Config file found: $config_found${RESET}"
+            log INFO "Created /etc/odoo directory in container"
         fi
+        
+        # Copy the odoo.conf template to the container
+        if ! docker cp "$INSTALL_DIR/config/odoo.conf" "$CONTAINER_NAME:/etc/odoo/odoo.conf"; then
+            log ERROR "Failed to copy odoo.conf to container"
+            echo -e "${RED}Failed to copy configuration file to container${RESET}"
+        else
+            log INFO "Copied odoo.conf to container"
+        fi
+        
+        # Set proper permissions - ALWAYS use root (-u 0) for permission changes
+        if ! docker exec -u 0 $CONTAINER_NAME chown odoo:odoo /etc/odoo/odoo.conf; then
+            log ERROR "Failed to set ownership on odoo.conf"
+            echo -e "${RED}Failed to set file ownership - permission issue${RESET}"
+        else
+            log INFO "Set ownership on odoo.conf"
+        fi
+        
+        if ! docker exec -u 0 $CONTAINER_NAME chmod 644 /etc/odoo/odoo.conf; then
+            log ERROR "Failed to set permissions on odoo.conf"
+            echo -e "${RED}Failed to set file permissions - permission issue${RESET}"
+        else
+            log INFO "Set permissions on odoo.conf"
+        fi
+        
+        log INFO "Copied odoo.conf template to container"
+        echo -e "${GREEN}✓${RESET} odoo.conf template copied successfully"
     else
-        log INFO "No mount issues detected"
-        echo -e "${GREEN}${BOLD}✓${RESET} No Docker mount issues detected"
+        log INFO "odoo.conf properly mounted in container"
+        echo -e "${GREEN}✓${RESET} odoo.conf properly mounted in container"
     fi
     
-    # Update Odoo configuration to ensure enterprise path is first
-    log INFO "Ensuring correct odoo.conf configuration"
+    # Check if addons_path is correctly set in the mounted odoo.conf
+    local addons_path=$(docker exec $CONTAINER_NAME grep "^addons_path" /etc/odoo/odoo.conf 2>/dev/null || echo "")
     
-    # Make sure addons_path is correctly set
-    docker exec $CONTAINER_NAME bash -c 'if [ -f /etc/odoo/odoo.conf ]; then
-        if ! grep -q "^addons_path" /etc/odoo/odoo.conf; then 
-            echo "addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons" >> /etc/odoo/odoo.conf
-        else 
-            sed -i "s|^addons_path.*|addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons|g" /etc/odoo/odoo.conf
+    if [[ "$addons_path" != *"/mnt/enterprise"* ]]; then
+        log WARNING "addons_path in odoo.conf doesn't include enterprise path"
+        echo -e "${YELLOW}addons_path in odoo.conf doesn't include enterprise path, fixing...${RESET}"
+        
+        # Copy the original odoo.conf from the container to a temporary file
+        local TEMP_CONF=$(mktemp)
+        if ! docker cp "$CONTAINER_NAME:/etc/odoo/odoo.conf" "$TEMP_CONF"; then
+            log ERROR "Failed to copy odoo.conf from container for editing"
+            echo -e "${RED}Failed to retrieve configuration file - permission issue${RESET}"
+        else
+            log INFO "Retrieved odoo.conf from container for editing"
         fi
+        
+        # Update the addons_path
+        if grep -q "^addons_path" "$TEMP_CONF"; then
+            sed -i "s|^addons_path.*|addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons|g" "$TEMP_CONF"
+        else
+            echo "addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons" >> "$TEMP_CONF"
+        fi
+        
+        # Copy the updated odoo.conf back to the container
+        if ! docker cp "$TEMP_CONF" "$CONTAINER_NAME:/etc/odoo/odoo.conf"; then
+            log ERROR "Failed to copy updated odoo.conf back to container"
+            echo -e "${RED}Failed to update configuration file - permission issue${RESET}"
+        else
+            log INFO "Updated odoo.conf in container"
+        fi
+        
+        # Set proper permissions - ALWAYS use root (-u 0)
+        if ! docker exec -u 0 $CONTAINER_NAME chown odoo:odoo /etc/odoo/odoo.conf; then
+            log ERROR "Failed to set ownership on updated odoo.conf"
+            echo -e "${RED}Failed to set file ownership - permission issue${RESET}"
+        else
+            log INFO "Set ownership on updated odoo.conf"
+        fi
+        
+        if ! docker exec -u 0 $CONTAINER_NAME chmod 644 /etc/odoo/odoo.conf; then
+            log ERROR "Failed to set permissions on updated odoo.conf"
+            echo -e "${RED}Failed to set file permissions - permission issue${RESET}"
+        else
+            log INFO "Set permissions on updated odoo.conf"
+        fi
+        
+        # Clean up
+        rm -f "$TEMP_CONF"
+        
+        log INFO "Fixed addons_path in odoo.conf"
+        echo -e "${GREEN}✓${RESET} addons_path in odoo.conf fixed"
     else
-        mkdir -p /etc/odoo
-        echo "[options]
-addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
-data_dir = /var/lib/odoo" > /etc/odoo/odoo.conf
-    fi'
+        log INFO "addons_path in odoo.conf correctly includes enterprise path"
+        echo -e "${GREEN}✓${RESET} addons_path in odoo.conf is correctly configured"
+    fi
     
-    # Set correct permissions
-    docker exec $CONTAINER_NAME chown -R odoo:odoo /mnt/enterprise /etc/odoo /mnt/extra-addons 2>/dev/null
+    # Comprehensive permission fixing for module directories
+    log INFO "Setting proper permissions on all module directories"
+    echo -e "${CYAN}Setting proper permissions for module access...${RESET}"
+    
+    # Ensure enterprise directory exists and has proper permissions
+    if ! docker exec -u 0 $CONTAINER_NAME mkdir -p /mnt/enterprise /mnt/extra-addons; then
+        log ERROR "Failed to ensure module directories exist"
+        echo -e "${RED}Failed to create module directories - permission issue${RESET}"
+    else
+        log INFO "Ensured module directories exist"
+    fi
+    
+    # Set ownership recursively on module directories
+    if ! docker exec -u 0 $CONTAINER_NAME chown -R odoo:odoo /mnt/enterprise /mnt/extra-addons; then
+        log ERROR "Failed to set ownership on module directories"
+        echo -e "${RED}Failed to set directory ownership - permission issue${RESET}"
+    else
+        log INFO "Set ownership on module directories"
+    fi
+    
+    # Set proper directory permissions
+    if ! docker exec -u 0 $CONTAINER_NAME find /mnt/enterprise /mnt/extra-addons -type d -exec chmod 755 {} \; 2>/dev/null; then
+        log WARNING "Failed to set directory permissions - this may not be critical"
+        echo -e "${YELLOW}Note: Could not set all directory permissions${RESET}"
+    else
+        log INFO "Set directory permissions on module directories"
+    fi
+    
+    # Set proper file permissions
+    if ! docker exec -u 0 $CONTAINER_NAME find /mnt/enterprise /mnt/extra-addons -type f -exec chmod 644 {} \; 2>/dev/null; then
+        log WARNING "Failed to set file permissions - this may not be critical"
+        echo -e "${YELLOW}Note: Could not set all file permissions${RESET}"
+    else
+        log INFO "Set file permissions on module files"
+    fi
     
     # Restart Odoo service to apply changes
     log INFO "Restarting Odoo service"
     echo -e "${CYAN}Restarting Odoo to apply configuration changes...${RESET}"
     cd "$INSTALL_DIR"
-    docker compose restart web
+    if ! docker compose restart web; then
+        log ERROR "Failed to restart Odoo service"
+        echo -e "${RED}Failed to restart Odoo - service issue${RESET}"
+    else
+        log INFO "Restarted Odoo service"
+        echo -e "${GREEN}✓${RESET} Odoo restarted successfully"
+    fi
     
     # Wait for Odoo to restart
     sleep 15
@@ -1863,7 +1792,13 @@ data_dir = /var/lib/odoo" > /etc/odoo/odoo.conf
     # Update module list to recognize enterprise modules
     log INFO "Updating module list"
     echo -e "${CYAN}Updating module list to recognize enterprise modules...${RESET}"
-    docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME
+    if ! docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME; then
+        log WARNING "Failed to update module list - may need to be done manually"
+        echo -e "${YELLOW}Could not update module list automatically. You may need to do this manually in the Odoo Apps menu.${RESET}"
+    else
+        log INFO "Updated module list successfully"
+        echo -e "${GREEN}✓${RESET} Module list updated successfully"
+    fi
     
     log INFO "Enterprise module configuration complete"
     echo -e "${GREEN}${BOLD}✓${RESET} Enterprise modules configured successfully"
@@ -1923,7 +1858,9 @@ main() {
     
     # Create folders for log
     mkdir -p $(dirname "$LOG_FILE")
-    cat "$TEMP_LOG" > "$LOG_FILE"
+    cat "$TEMP_LOG" > "$LOG_FILE" 2>/dev/null || true # Use error suppression
+    chmod 755 "$(dirname "$LOG_FILE")" 2>/dev/null || true # Ensure log directory is readable
+    chmod 644 "$LOG_FILE" 2>/dev/null || true # Ensure log file is writable
 
     # Show the installation steps
     echo -e "${WHITE}${BOLD}Installation Steps:${RESET}"
