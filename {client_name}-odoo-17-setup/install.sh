@@ -750,15 +750,61 @@ create_directories() {
         validate "$INSTALL_DIR/$dir directory" "[ -d '$INSTALL_DIR/$dir' ]" "Failed to create directory: $INSTALL_DIR/$dir"
     done
 
+    # Create the necessary files to make addons directory a valid Odoo addon path
+    log INFO "Creating necessary files for addons directory..."
+    # Just create an empty __init__.py file to make it a valid Python module
+    touch "$INSTALL_DIR/addons/__init__.py"
+    
+    # Create a simple README file explaining the purpose of this directory
+    cat > "$INSTALL_DIR/addons/README.md" << EOF
+# Custom Addons Directory
+
+This directory is for custom Odoo modules. 
+Place your custom modules here to make them available in Odoo.
+
+Each module should be in its own subdirectory with at least:
+- __init__.py
+- __manifest__.py
+EOF
+    log INFO "Created initialization files for addons directory"
+
     # Set correct ownership and permissions
     chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data" "$INSTALL_DIR/volumes/postgres-data" "$INSTALL_DIR/logs" 2>/dev/null || true
     chmod -R 777 "$INSTALL_DIR/volumes/odoo-data" "$INSTALL_DIR/volumes/postgres-data" "$INSTALL_DIR/logs"
+    chmod -R 755 "$INSTALL_DIR/addons"
 
     # Move temporary log to final location
     mkdir -p "$(dirname "$LOG_FILE")"
     mv "$TEMP_LOG" "$LOG_FILE" 2>/dev/null || true
     log INFO "Directory structure created successfully"
     echo -e "${GREEN}${BOLD}✓${RESET} Directory structure created"
+}
+
+# Add a cleanup function to be called at the end of the installation
+cleanup_temporary_files() {
+    show_progress "Cleaning Up Temporary Files"
+    
+    log INFO "Cleaning up temporary files..."
+    
+    # Wait for a bit to ensure all services are stable
+    sleep 5
+    
+    # List of temporary files and directories to clean up
+    local TEMP_FILES=(
+        "$INSTALL_DIR/docker-compose.yml.bak"
+        "$INSTALL_DIR/addons/__init__.py"
+    )
+    
+    # Remove each temporary file if it exists
+    for file in "${TEMP_FILES[@]}"; do
+        if [ -f "$file" ]; then
+            rm -f "$file"
+            log INFO "Removed temporary file: $file"
+        fi
+    done
+    
+    log INFO "Temporary files cleanup completed"
+    echo -e "${GREEN}${BOLD}✓${RESET} Temporary files cleaned up"
 }
 
 # Check prerequisites
@@ -1080,7 +1126,7 @@ initialize_database() {
         ERROR "PostgreSQL container $DB_CONTAINER is not running. Starting it now..."
         cd "$INSTALL_DIR"
         docker compose up -d db
-    sleep 10
+        sleep 15  # Wait longer for PostgreSQL to fully initialize
 
         if ! docker ps | grep -q "$DB_CONTAINER"; then
             ERROR "Failed to start PostgreSQL container $DB_CONTAINER"
@@ -1109,20 +1155,34 @@ initialize_database() {
     fi
     DEBUG "Successfully retrieved database password for initialization"
     
+    # Ensure PostgreSQL is ready to accept connections
+    INFO "Checking if PostgreSQL is ready to accept connections..."
+    local pg_ready_attempts=0
+    local max_pg_ready_attempts=30
+    
+    while [ $pg_ready_attempts -lt $max_pg_ready_attempts ]; do
+        if docker exec "$DB_CONTAINER" pg_isready -U "$DB_ADMIN_USER" -h localhost -q; then
+            INFO "PostgreSQL is ready to accept connections"
+            break
+        fi
+        pg_ready_attempts=$((pg_ready_attempts + 1))
+        INFO "Waiting for PostgreSQL to be ready (attempt $pg_ready_attempts/$max_pg_ready_attempts)..."
+        sleep 2
+    done
+    
+    if [ $pg_ready_attempts -eq $max_pg_ready_attempts ]; then
+        ERROR "PostgreSQL failed to become ready after $max_pg_ready_attempts attempts"
+        return 1
+    fi
+    
     # Ensure the odoo user's password matches the POSTGRES_PASSWORD
     echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
     INFO "Checking if database user '$DB_USER' exists..."
     
-    USER_CHECK_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';" 2>&1)
-    USER_CHECK_STATUS=$?
+    # Use a simple query that has a reliable output format
+    USER_EXISTS=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';")
     
-    if [ $USER_CHECK_STATUS -ne 0 ]; then
-        ERROR "Failed to check if user exists: $USER_CHECK_RESULT"
-        echo -e "${RED}Failed to check if database user exists: $USER_CHECK_RESULT${RESET}"
-        echo -e "${YELLOW}Will attempt to create user anyway...${RESET}"
-    fi
-    
-    if ! echo "$USER_CHECK_RESULT" | grep -q "1 row"; then
+    if [ "$USER_EXISTS" != "1" ]; then
         echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
         INFO "Creating database user $DB_USER..."
         
@@ -1161,10 +1221,10 @@ initialize_database() {
     echo -e "${YELLOW}Preparing database: Checking for existing database...${RESET}"
     INFO "Checking if database '$DB_NAME' exists..."
     
-    # Check if the database exists
-    DB_EXISTS=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -lqt | cut -d \| -f 1 | grep -w "$DB_NAME" | wc -l)
+    # Check if the database exists using a more reliable method
+    DB_EXISTS=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';")
     
-    if [ "$DB_EXISTS" -eq 1 ]; then
+    if [ "$DB_EXISTS" = "1" ]; then
         echo -e "${YELLOW}Database '$DB_NAME' exists. Terminating connections and dropping database...${RESET}"
         INFO "Database '$DB_NAME' exists. Terminating connections first..."
         
@@ -1205,7 +1265,7 @@ initialize_database() {
     if [ $CREATE_STATUS -ne 0 ]; then
         ERROR "Failed to create database: $CREATE_RESULT"
         echo -e "${RED}Failed to create database: $CREATE_RESULT${RESET}"
-    return 1
+        return 1
     else
         echo -e "${GREEN}Database created successfully${RESET}"
         INFO "Database created successfully"
@@ -1381,6 +1441,33 @@ start_containers() {
 
     log INFO "Starting Docker containers..."
     cd "$INSTALL_DIR"
+
+    # Ensure the config directory contains odoo.conf
+    if [ ! -f "$INSTALL_DIR/config/odoo.conf" ]; then
+        log INFO "Creating default odoo.conf..."
+        cat > "$INSTALL_DIR/config/odoo.conf" << EOF
+[options]
+admin_passwd = $DB_PASS
+db_host = db
+db_port = 5432
+db_user = $DB_USER
+db_password = $DB_PASS
+addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+data_dir = /var/lib/odoo
+logfile = /var/log/odoo/odoo.log
+log_level = info
+max_cron_threads = 2
+workers = 4
+limit_memory_hard = 2684354560
+limit_memory_soft = 2147483648
+limit_request = 8192
+limit_time_cpu = 600
+limit_time_real = 1200
+proxy_mode = True
+EOF
+        chmod 644 "$INSTALL_DIR/config/odoo.conf"
+        log INFO "Created default odoo.conf"
+    fi
 
     # Pull images
     log INFO "Pulling Docker images..."
@@ -1779,17 +1866,18 @@ main() {
 
     # Show the installation steps
     echo -e "${WHITE}${BOLD}Installation Steps:${RESET}"
-    echo -e " ${GRAY}[1/11] Checking Prerequisites${RESET}"
-    echo -e " ${GRAY}[2/11] Creating Directory Structure${RESET}"
-    echo -e " ${GRAY}[3/11] Extracting Enterprise Addons${RESET}"
-    echo -e " ${GRAY}[4/11] Creating Backup Script${RESET}"
-    echo -e " ${GRAY}[5/11] Setting up Cron Jobs${RESET}"
-    echo -e " ${GRAY}[6/11] Configuring SSL (if applicable)${RESET}"
-    echo -e " ${GRAY}[7/11] Starting Docker Containers${RESET}"
-    echo -e " ${GRAY}[8/11] Initializing Odoo Database${RESET}"
-    echo -e " ${GRAY}[9/11] Configuring Enterprise Modules${RESET}"
-    echo -e " ${GRAY}[10/11] Verifying Services${RESET}"
-    echo -e " ${GRAY}[11/11] Finalizing Installation${RESET}"
+    echo -e " ${GRAY}[1/12] Checking Prerequisites${RESET}"
+    echo -e " ${GRAY}[2/12] Creating Directory Structure${RESET}"
+    echo -e " ${GRAY}[3/12] Extracting Enterprise Addons${RESET}"
+    echo -e " ${GRAY}[4/12] Creating Backup Script${RESET}"
+    echo -e " ${GRAY}[5/12] Setting up Cron Jobs${RESET}"
+    echo -e " ${GRAY}[6/12] Configuring SSL (if applicable)${RESET}"
+    echo -e " ${GRAY}[7/12] Starting Docker Containers${RESET}"
+    echo -e " ${GRAY}[8/12] Initializing Odoo Database${RESET}"
+    echo -e " ${GRAY}[9/12] Configuring Enterprise Modules${RESET}"
+    echo -e " ${GRAY}[10/12] Verifying Services${RESET}"
+    echo -e " ${GRAY}[11/12] Cleaning Up Temporary Files${RESET}"
+    echo -e " ${GRAY}[12/12] Finalizing Installation${RESET}"
     echo ""
 
     # Perform installation
@@ -1814,6 +1902,9 @@ main() {
     # Use the detected password for remaining functions
     check_service_health "$DB_WORKING_PASSWORD"
     verify_installation
+    
+    # Clean up temporary files
+    cleanup_temporary_files
     
     # Show completion message if everything succeeded
     if [ $? -eq 0 ]; then
