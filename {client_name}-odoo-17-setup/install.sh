@@ -1177,6 +1177,11 @@ initialize_database() {
     DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
     INFO "Using database admin user: $DB_ADMIN_USER"
     
+    # IMPORTANT: The Linux user for PostgreSQL commands should match the PostgreSQL superuser
+    # This fixes the "role 'postgres' does not exist" error when POSTGRES_USER is set to something else
+    LINUX_USER="$DB_ADMIN_USER"
+    INFO "Using Linux user '$LINUX_USER' for database operations"
+    
     # Securely determine database password - this will be the POSTGRES_PASSWORD from the container
     DB_WORKING_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
     if [ -z "$DB_WORKING_PASSWORD" ]; then
@@ -1201,8 +1206,8 @@ initialize_database() {
     while [ $pg_ready_attempts -lt $max_pg_ready_attempts ]; do
         if docker exec "$DB_CONTAINER" pg_isready -U "$DB_ADMIN_USER" -h localhost -q; then
             INFO "PostgreSQL is ready to accept connections"
-            break
-        fi
+                break
+            fi
         pg_ready_attempts=$((pg_ready_attempts + 1))
         INFO "Waiting for PostgreSQL to be ready (attempt $pg_ready_attempts/$max_pg_ready_attempts)..."
         sleep 2
@@ -1213,23 +1218,19 @@ initialize_database() {
         return 1
     fi
     
-    # IMPORTANT: Use Linux user 'postgres' for all psql commands, but specify the DB user with -U
-    # This fixes the "no matching entries in passwd file" error
-    LINUX_USER="postgres"
-    
-    # Ensure the odoo user's password matches the POSTGRES_PASSWORD
-    echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
-    INFO "Checking if database user '$DB_USER' exists..."
-    
     # Add timeout for database operations
     TIMEOUT_CMD="timeout 10"
+    
+    # Ensure the odoo user exists and has correct password
+    echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
+    INFO "Checking if database user '$DB_USER' exists..."
     
     # Use a more robust check with timeout
     local user_query="SELECT 1 FROM pg_roles WHERE rolname='$DB_USER';"
     DEBUG "Executing query: $user_query"
     USER_EXISTS=""
     
-    # Try with timeout to prevent hanging - use postgres Linux user but MUST specify DB_ADMIN_USER as PostgreSQL user
+    # Try with timeout to prevent hanging - using appropriate Linux user
     USER_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -tAc "$user_query" 2>/dev/null || echo "ERROR")
     
     if [ "$USER_EXISTS" = "ERROR" ]; then
@@ -1240,56 +1241,60 @@ initialize_database() {
     
     DEBUG "User exists check result: '$USER_EXISTS'"
     
-    if [ "$USER_EXISTS" != "1" ]; then
-        echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
-        INFO "Creating database user $DB_USER..."
-        
-        # Try to create user with timeout - using Linux user postgres but specifying DB_ADMIN_USER as PostgreSQL user
-        # IMPORTANT: Use the exact same password as the admin password to avoid authentication issues
-        USER_CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
-        USER_CREATE_STATUS=$?
-        
-        if [ $USER_CREATE_STATUS -ne 0 ]; then
-            ERROR "Failed to create database user: $USER_CREATE_RESULT"
-            echo -e "${RED}Failed to create database user: $USER_CREATE_RESULT${RESET}"
-            # Continue anyway - user might actually exist
-            echo -e "${YELLOW}Will attempt to continue anyway...${RESET}"
+    # Only create/modify odoo user if it's not already the admin user
+    if [ "$DB_USER" != "$DB_ADMIN_USER" ]; then
+        if [ "$USER_EXISTS" != "1" ]; then
+            echo -e "${YELLOW}Creating database user $DB_USER...${RESET}"
+            INFO "Creating database user $DB_USER..."
+            
+            # Try to create user with timeout - using the right Linux user but specifying DB_ADMIN_USER as PostgreSQL user
+            USER_CREATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+            USER_CREATE_STATUS=$?
+            
+            if [ $USER_CREATE_STATUS -ne 0 ]; then
+                ERROR "Failed to create database user: $USER_CREATE_RESULT"
+                echo -e "${RED}Failed to create database user: $USER_CREATE_RESULT${RESET}"
+                # Continue anyway - user might actually exist
+                echo -e "${YELLOW}Will attempt to continue anyway...${RESET}"
+            else
+                echo -e "${GREEN}Database user $DB_USER created successfully${RESET}"
+                INFO "Database user $DB_USER created successfully"
+            fi
         else
-            echo -e "${GREEN}Database user $DB_USER created successfully${RESET}"
-            INFO "Database user $DB_USER created successfully"
+            echo -e "${YELLOW}Updating database user $DB_USER password...${RESET}"
+            INFO "Updating database user $DB_USER password..."
+            
+            # Try to update user password with timeout - using the right Linux user
+            PASSWORD_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
+            PASSWORD_UPDATE_STATUS=$?
+            
+            if [ $PASSWORD_UPDATE_STATUS -ne 0 ]; then
+                ERROR "Failed to update database user password: $PASSWORD_UPDATE_RESULT"
+                echo -e "${RED}Failed to update database user password: $PASSWORD_UPDATE_RESULT${RESET}"
+                # Continue anyway
+                echo -e "${YELLOW}Will attempt to continue anyway...${RESET}"
+            else
+                echo -e "${GREEN}Database user $DB_USER password updated successfully${RESET}"
+                INFO "Database user $DB_USER password updated successfully"
+            fi
+            
+            # Make odoo user a superuser in a separate command to avoid failures if it's already superuser
+            SUPERUSER_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH SUPERUSER;" 2>&1)
+            SUPERUSER_UPDATE_STATUS=$?
+            
+            if [ $SUPERUSER_UPDATE_STATUS -ne 0 ]; then
+                WARNING "Failed to set superuser status for $DB_USER: $SUPERUSER_UPDATE_RESULT"
+                echo -e "${YELLOW}Note: Failed to set superuser status - this may not be critical${RESET}"
+            else
+                INFO "Set superuser status for $DB_USER"
+            fi
         fi
     else
-        echo -e "${YELLOW}Updating database user $DB_USER password...${RESET}"
-        INFO "Updating database user $DB_USER password..."
-        
-        # Try to update user password with timeout - using Linux user postgres but specifying DB_ADMIN_USER
-        # IMPORTANT: Use the exact same password as the admin password to avoid authentication issues
-        PASSWORD_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
-        PASSWORD_UPDATE_STATUS=$?
-        
-        if [ $PASSWORD_UPDATE_STATUS -ne 0 ]; then
-            ERROR "Failed to update database user password: $PASSWORD_UPDATE_RESULT"
-            echo -e "${RED}Failed to update database user password: $PASSWORD_UPDATE_RESULT${RESET}"
-            # Continue anyway
-            echo -e "${YELLOW}Will attempt to continue anyway...${RESET}"
-        else
-            echo -e "${GREEN}Database user $DB_USER password updated successfully${RESET}"
-            INFO "Database user $DB_USER password updated successfully"
-        fi
-        
-        # Make odoo user a superuser in a separate command to avoid failures if it's already superuser
-        SUPERUSER_UPDATE_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "ALTER USER $DB_USER WITH SUPERUSER;" 2>&1)
-        SUPERUSER_UPDATE_STATUS=$?
-        
-        if [ $SUPERUSER_UPDATE_STATUS -ne 0 ]; then
-            WARNING "Failed to set superuser status for $DB_USER: $SUPERUSER_UPDATE_RESULT"
-            echo -e "${YELLOW}Note: Failed to set superuser status - this may not be critical${RESET}"
-        else
-            INFO "Set superuser status for $DB_USER"
-        fi
+        INFO "Database user '$DB_USER' is already the admin user, no need to create/modify"
+        echo -e "${GREEN}Database user '$DB_USER' is already the admin user${RESET}"
     fi
     
-    # Check if database exists - using Linux user postgres but specifying DB_ADMIN_USER
+    # Check if database exists - using the right Linux user
     local check_db_query="SELECT 1 FROM pg_database WHERE datname='$DB_NAME';"
     DEBUG "Checking if database '$DB_NAME' exists: $check_db_query"
     DB_EXISTS=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -tAc "$check_db_query" 2>/dev/null || echo "ERROR")
@@ -1306,7 +1311,7 @@ initialize_database() {
         echo -e "${YELLOW}Database '$DB_NAME' exists. Terminating connections and dropping database...${RESET}"
         INFO "Database '$DB_NAME' exists. Terminating connections first..."
         
-        # Terminate existing connections with timeout - using Linux user postgres but specifying DB_ADMIN_USER
+        # Terminate existing connections with timeout - using the right Linux user
         TERM_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB_NAME';" 2>&1)
         TERM_STATUS=$?
         
@@ -1319,7 +1324,7 @@ initialize_database() {
             INFO "Database connections terminated successfully"
         fi
         
-        # Drop the database with timeout - using Linux user postgres but specifying DB_ADMIN_USER
+        # Drop the database with timeout - using the right Linux user
         DROP_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "DROP DATABASE IF EXISTS $DB_NAME;" 2>&1)
         DROP_STATUS=$?
         
@@ -1333,7 +1338,7 @@ initialize_database() {
         fi
     fi
     
-    # Create new database with timeout - using Linux user postgres but specifying DB_ADMIN_USER
+    # Create new database with timeout - using the right Linux user
     echo -e "${YELLOW}Creating new database '$DB_NAME'...${RESET}"
     INFO "Creating new database '$DB_NAME'..."
     
@@ -1349,22 +1354,24 @@ initialize_database() {
         INFO "Database created successfully"
     fi
     
-    # Grant all privileges on database to odoo user
-    echo -e "${YELLOW}Ensuring $DB_USER has full privileges on $DB_NAME...${RESET}"
-    INFO "Ensuring $DB_USER has full privileges on $DB_NAME..."
-    
-    GRANT_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>&1)
-    GRANT_STATUS=$?
-    
-    if [ $GRANT_STATUS -ne 0 ]; then
-        WARNING "Failed to grant privileges: $GRANT_RESULT"
-        echo -e "${YELLOW}Failed to grant privileges - not critical if user is superuser${RESET}"
-    else
-        echo -e "${GREEN}Privileges granted successfully${RESET}"
-        INFO "Privileges granted successfully"
+    # Grant all privileges on database to odoo user if different from admin user
+    if [ "$DB_USER" != "$DB_ADMIN_USER" ]; then
+        echo -e "${YELLOW}Ensuring $DB_USER has full privileges on $DB_NAME...${RESET}"
+        INFO "Ensuring $DB_USER has full privileges on $DB_NAME..."
+        
+        GRANT_RESULT=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>&1)
+        GRANT_STATUS=$?
+        
+        if [ $GRANT_STATUS -ne 0 ]; then
+            WARNING "Failed to grant privileges: $GRANT_RESULT"
+            echo -e "${YELLOW}Failed to grant privileges - not critical if user is superuser${RESET}"
+        else
+            echo -e "${GREEN}Privileges granted successfully${RESET}"
+            INFO "Privileges granted successfully"
+        fi
     fi
     
-    # Verify database was created successfully - using Linux user postgres but specifying DB_ADMIN_USER
+    # Verify database was created successfully - using the right Linux user
     VERIFY_DB=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -lqt | grep -w "$DB_NAME" | wc -l)
     if [ "$VERIFY_DB" -ge 1 ]; then
         echo -e "${GREEN}Database '$DB_NAME' verification successful${RESET}"
@@ -1390,7 +1397,16 @@ initialize_database() {
     INFO "Exporting database credentials to script environment..."
     export DB_PASSWORD="$DB_WORKING_PASSWORD"
     
-    # NEW ADDITION: Initialize Odoo schema in the database
+    # Create a .env file for docker-compose to use
+    echo -e "${YELLOW}Creating .env file with database credentials...${RESET}"
+    INFO "Creating .env file with database credentials..."
+    echo "DB_PASSWORD=$DB_WORKING_PASSWORD" > "$INSTALL_DIR/.env"
+    echo "POSTGRES_PASSWORD=$DB_WORKING_PASSWORD" >> "$INSTALL_DIR/.env"
+    echo "DB_HOST=db" >> "$INSTALL_DIR/.env"
+    echo "DB_PORT=5432" >> "$INSTALL_DIR/.env"
+    echo "DB_USER=$DB_USER" >> "$INSTALL_DIR/.env"
+    
+    # Initialize Odoo schema in the database
     echo -e "${YELLOW}Initializing Odoo database schema...${RESET}"
     INFO "Initializing Odoo database schema..."
     
@@ -1426,40 +1442,51 @@ initialize_database() {
     ODOO_INIT_STATUS=$?
     
     if [ $ODOO_INIT_STATUS -ne 0 ]; then
-        WARNING "Odoo initialization may have failed: $ODOO_INIT_RESULT"
-        echo -e "${YELLOW}Warning: Odoo initialization may have failed: ${RESET}"
-        echo -e "${YELLOW}Will attempt another initialization method...${RESET}"
+        WARNING "Odoo initialization using network name may have failed, trying with container name"
+        echo -e "${YELLOW}Warning: First initialization method failed, trying with container name...${RESET}"
         
-        # Try using the existing container
-        echo -e "${YELLOW}Trying alternative initialization method...${RESET}"
-        INFO "Trying alternative initialization method with existing container..."
+        # Try again using the container hostname
+        ODOO_INIT_RESULT=$(docker run --rm --network=$DOCKER_NETWORK \
+                          -e HOST=$DB_CONTAINER \
+                          -e PORT=5432 \
+                          -e USER=$DB_USER \
+                          -e PASSWORD=$DB_WORKING_PASSWORD \
+                          odoo:17.0 odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --no-http 2>&1)
+        ODOO_INIT_STATUS=$?
         
-        # Start the container in a way that doesn't conflict with port 8069
-        cd "$INSTALL_DIR"
-        
-        # Add database credentials to the docker-compose environment
-        echo -e "DB_PASSWORD=$DB_WORKING_PASSWORD" > .env
-        echo -e "POSTGRES_PASSWORD=$DB_WORKING_PASSWORD" >> .env
-        
-        docker compose up -d web
-        sleep 10
-        
-        # Run the initialization command in the running container with explicit credentials
-        ODOO_INIT_RETRY=$(docker exec \
-                         -e DB_HOST=db \
-                         -e DB_PORT=5432 \
-                         -e DB_USER=$DB_USER \
-                         -e DB_PASSWORD=$DB_WORKING_PASSWORD \
-                         $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
-        ODOO_INIT_RETRY_STATUS=$?
-        
-        if [ $ODOO_INIT_RETRY_STATUS -ne 0 ]; then
-            ERROR "Alternative Odoo initialization failed: $ODOO_INIT_RETRY"
-            echo -e "${RED}Alternative Odoo initialization also failed${RESET}"
-            echo -e "${YELLOW}Will verify if schema was created anyway...${RESET}"
+        if [ $ODOO_INIT_STATUS -ne 0 ]; then
+            WARNING "Odoo initialization may have failed: $ODOO_INIT_RESULT"
+            echo -e "${YELLOW}Warning: Second initialization method also failed, trying with existing container...${RESET}"
+            
+            # Try using the existing container
+            echo -e "${YELLOW}Trying alternative initialization method...${RESET}"
+            INFO "Trying alternative initialization method with existing container..."
+            
+            # Start the container in a way that doesn't conflict with port 8069
+            cd "$INSTALL_DIR"
+            docker compose up -d web
+            sleep 10
+            
+            # Run the initialization command in the running container with explicit credentials
+            ODOO_INIT_RETRY=$(docker exec \
+                             -e DB_HOST=db \
+                             -e DB_PORT=5432 \
+                             -e DB_USER=$DB_USER \
+                             -e DB_PASSWORD=$DB_WORKING_PASSWORD \
+                             $CONTAINER_NAME odoo --stop-after-init -d $DB_NAME -i base --without-demo=all --load-language=en_US --http-port=8070 2>&1)
+            ODOO_INIT_RETRY_STATUS=$?
+            
+            if [ $ODOO_INIT_RETRY_STATUS -ne 0 ]; then
+                ERROR "Alternative Odoo initialization failed: $ODOO_INIT_RETRY"
+                echo -e "${RED}Alternative Odoo initialization also failed${RESET}"
+                echo -e "${YELLOW}Will verify if schema was created anyway...${RESET}"
+            else
+                echo -e "${GREEN}Alternative Odoo initialization completed successfully${RESET}"
+                INFO "Alternative Odoo initialization completed successfully"
+            fi
         else
-            echo -e "${GREEN}Alternative Odoo initialization completed successfully${RESET}"
-            INFO "Alternative Odoo initialization completed successfully"
+            echo -e "${GREEN}Odoo schema initialization completed successfully with container name${RESET}"
+            INFO "Odoo schema initialization completed successfully with container name"
         fi
     else
         echo -e "${GREEN}Odoo schema initialization completed successfully${RESET}"
@@ -1470,11 +1497,6 @@ initialize_database() {
     echo -e "${YELLOW}Restarting Odoo service...${RESET}"
     INFO "Restarting Odoo service..."
     cd "$INSTALL_DIR"
-    
-    # Add database credentials to the docker-compose environment
-    echo -e "DB_PASSWORD=$DB_WORKING_PASSWORD" > .env
-    echo -e "POSTGRES_PASSWORD=$DB_WORKING_PASSWORD" >> .env
-    
     docker compose up -d web
     sleep 10
     
@@ -1482,13 +1504,29 @@ initialize_database() {
     echo -e "${YELLOW}Verifying Odoo schema was initialized...${RESET}"
     INFO "Verifying Odoo schema was initialized by checking for ir_module_module table..."
     
-    # Check for the ir_module_module table - using Linux user postgres but specifying DB_ADMIN_USER
+    # Check for the ir_module_module table - using the right Linux user
     SCHEMA_CHECK=$(${TIMEOUT_CMD} docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -tAc "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module');" 2>/dev/null || echo "ERROR")
     
     if [ "$SCHEMA_CHECK" = "ERROR" ] || [ "$SCHEMA_CHECK" != "t" ]; then
         ERROR "Failed to verify Odoo schema: ir_module_module table not found"
         echo -e "${RED}Failed to verify Odoo schema: ir_module_module table not found${RESET}"
         echo -e "${YELLOW}Installation may not function correctly${RESET}"
+        
+        # Try one last method - direct command to create a database through Odoo
+        echo -e "${YELLOW}Trying one last approach to initialize database from Odoo interface...${RESET}"
+        INFO "Trying one last approach to initialize database from Odoo interface..."
+        
+        # Start Odoo and wait for it to be ready
+        cd "$INSTALL_DIR"
+        docker compose up -d web
+        sleep 15
+        
+        # Try to use the Odoo built-in database creation interface
+        echo -e "${YELLOW}Please check if you can access http://localhost:8069/web/database/manager${RESET}"
+        echo -e "${YELLOW}You may need to create the database manually through the interface${RESET}"
+        
+        # Return 0 for now so the installation doesn't fail completely
+        return 0
     else
         echo -e "${GREEN}Odoo schema verification successful - ir_module_module table exists${RESET}"
         INFO "Odoo schema verification successful - ir_module_module table exists"
@@ -1951,41 +1989,56 @@ ensure_enterprise_modules() {
     log INFO "Updating module list"
     echo -e "${CYAN}Updating module list to recognize enterprise modules...${RESET}"
     
-    # Use Odoo shell command which doesn't start another server instance
-    if ! docker exec $CONTAINER_NAME odoo shell -d $DB_NAME -c "env['ir.module.module'].update_list()" --no-http 2>/dev/null; then
-        # Try alternative approach with different port if shell command fails
-        log WARNING "Shell method failed, trying alternative approach"
-        echo -e "${YELLOW}First update method failed, trying alternative...${RESET}"
+    # Get DB admin user for verification queries
+    DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
+    LINUX_USER="$DB_ADMIN_USER"
+    
+    # First check if schema is initialized
+    SCHEMA_CHECK=$(docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -tAc "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='ir_module_module');" 2>/dev/null || echo "f")
+    
+    if [ "$SCHEMA_CHECK" != "t" ]; then
+        log WARNING "Database schema not initialized, skipping module list update"
+        echo -e "${YELLOW}Database schema not initialized, module list update skipped${RESET}"
+        return 0
+    fi
+    
+    # Try different approaches to update the module list
+    UPDATE_METHODS=(
+        # Method 1: Using Odoo shell command (safest)
+        "docker exec $CONTAINER_NAME odoo shell -d $DB_NAME --no-http -c \"self.env['ir.module.module'].update_list()\""
         
-        # Try with a different port to avoid conflicts
-        if ! docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME --http-port=8070 2>/dev/null; then
-            # Fall back to temporarily stopping Odoo
-            log WARNING "Alternative update method failed, trying with server stop"
-            echo -e "${YELLOW}Alternative update method failed, temporarily stopping server...${RESET}"
-            
-            # Stop Odoo, run update, then restart
-            cd "$INSTALL_DIR"
-            docker compose stop web
-            sleep 5
-            
-            if ! docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME 2>/dev/null; then
-                log WARNING "Failed to update module list - may need to be done manually"
-                echo -e "${YELLOW}Could not update module list automatically. You may need to do this manually in the Odoo Apps menu.${RESET}"
-            else
-                log INFO "Updated module list successfully after stopping server"
-                echo -e "${GREEN}✓${RESET} Module list updated successfully"
-            fi
-            
-            # Restart Odoo
-            docker compose start web
-            sleep 10
-        else
-            log INFO "Updated module list successfully with alternative port"
-            echo -e "${GREEN}✓${RESET} Module list updated successfully"
+        # Method 2: Using alternative port to avoid conflicts
+        "docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME --http-port=8070"
+        
+        # Method 3: Temporarily stopping server
+        "docker compose stop web && sleep 5 && docker exec $CONTAINER_NAME odoo --stop-after-init --update=base -d $DB_NAME && docker compose start web"
+    )
+    
+    SUCCESS=false
+    
+    for method in "${UPDATE_METHODS[@]}"; do
+        if [ "$SUCCESS" = true ]; then
+            break
         fi
-    else
-        log INFO "Updated module list successfully using shell method"
-        echo -e "${GREEN}✓${RESET} Module list updated successfully"
+        
+        log INFO "Trying module update method: $method"
+        echo -e "${YELLOW}Trying module update method...${RESET}"
+        
+        # Execute the method with proper error handling
+        eval "$method" > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            SUCCESS=true
+            log INFO "Module list updated successfully"
+            echo -e "${GREEN}✓${RESET} Module list updated successfully"
+        else
+            log WARNING "Module update method failed, trying next approach"
+            echo -e "${YELLOW}Update method failed, trying alternative...${RESET}"
+        fi
+    done
+    
+    if [ "$SUCCESS" = false ]; then
+        log WARNING "All module update methods failed - may need to be done manually"
+        echo -e "${YELLOW}Could not update module list automatically. You may need to do this manually in the Odoo Apps menu.${RESET}"
     fi
     
     # Verify that enterprise modules are recognized
@@ -1995,9 +2048,7 @@ ensure_enterprise_modules() {
     # Wait for potential background operations to complete
     sleep 5
     
-    # Check for enterprise modules in database - using Linux user postgres but specifying DB_ADMIN_USER
-    local LINUX_USER="postgres"
-    local DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
+    # Check for enterprise modules in database - using the right Linux user
     local ENTERPRISE_COUNT=$(docker exec -u "$LINUX_USER" "$DB_CONTAINER" psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM ir_module_module WHERE name LIKE 'account%' OR name LIKE 'crm%' OR name LIKE 'sale%';" 2>/dev/null || echo "ERROR")
     
     if [ "$ENTERPRISE_COUNT" = "ERROR" ] || [ "$ENTERPRISE_COUNT" -lt 5 ]; then
