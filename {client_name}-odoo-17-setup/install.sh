@@ -1092,6 +1092,10 @@ initialize_database() {
     DOCKER_NETWORK=$(docker inspect "$DB_CONTAINER" --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{end}}')
     DEBUG "Using Docker network: $DOCKER_NETWORK"
     
+    # Get the POSTGRES_USER from container environment
+    DB_ADMIN_USER=$(docker exec "$DB_CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo "postgres")
+    INFO "Using database admin user: $DB_ADMIN_USER"
+    
     # Securely determine database password
     DB_WORKING_PASSWORD=$(docker exec "$DB_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null || echo "")
     if [ -z "$DB_WORKING_PASSWORD" ]; then
@@ -1104,41 +1108,6 @@ initialize_database() {
         fi
     fi
     DEBUG "Successfully retrieved database password for initialization"
-    
-    # Ensure the odoo user's password matches the POSTGRES_PASSWORD
-    echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
-    INFO "Checking if database user '$DB_USER' exists..."
-    
-    # First, check if postgres role exists and determine the admin user
-    echo -e "${YELLOW}Checking PostgreSQL admin user...${RESET}"
-    INFO "Checking PostgreSQL admin user configuration..."
-    
-    # Test if postgres user exists
-    POSTGRES_TEST=$(docker exec "$DB_CONTAINER" psql -U postgres -c "SELECT 1;" 2>&1)
-    POSTGRES_STATUS=$?
-    
-    if [ $POSTGRES_STATUS -eq 0 ]; then
-        # postgres user exists and works
-        DB_ADMIN_USER="postgres"
-        INFO "Using standard 'postgres' admin user"
-    else
-        # Try to identify what admin user exists by checking process list
-        echo -e "${YELLOW}postgres role not found, determining alternate admin user...${RESET}"
-        PSQL_PROC=$(docker exec "$DB_CONTAINER" ps aux | grep postgres)
-        
-        # Check if we can find the username that's running PostgreSQL
-        if echo "$PSQL_PROC" | grep -q "\-D"; then
-            # Extract username from process
-            DB_ADMIN_USER=$(echo "$PSQL_PROC" | grep "\-D" | awk '{print $1}' | head -1)
-            echo -e "${GREEN}Found alternate admin user: $DB_ADMIN_USER${RESET}"
-            INFO "Found alternate admin user: $DB_ADMIN_USER"
-        else
-            # Default to 'postgres' and we'll handle errors later
-            DB_ADMIN_USER="postgres"
-            echo -e "${YELLOW}Could not determine admin user, trying with 'postgres'${RESET}"
-            INFO "Could not determine admin user, trying with 'postgres'"
-        fi
-    fi
     
     # Ensure the odoo user's password matches the POSTGRES_PASSWORD
     echo -e "${YELLOW}Ensuring database user passwords are synchronized...${RESET}"
@@ -1163,50 +1132,7 @@ initialize_database() {
         if [ $USER_CREATE_STATUS -ne 0 ]; then
             ERROR "Failed to create database user: $USER_CREATE_RESULT"
             echo -e "${RED}Failed to create database user: $USER_CREATE_RESULT${RESET}"
-            echo -e "${YELLOW}Trying alternative approach to create user...${RESET}"
-            
-            # Try alternative approach with createuser command
-            ALT_USER_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" createuser -s "$DB_USER" 2>&1)
-            ALT_USER_STATUS=$?
-            
-            if [ $ALT_USER_STATUS -ne 0 ]; then
-                ERROR "Alternative user creation also failed: $ALT_USER_RESULT"
-                echo -e "${RED}Alternative user creation also failed: $ALT_USER_RESULT${RESET}"
-                
-                # Last resort: try using the default user with psql
-                echo -e "${YELLOW}Trying with default PostgreSQL user...${RESET}"
-                INFO "Trying to create user with default PostgreSQL user credentials"
-                
-                LAST_RESORT=$(docker exec "$DB_CONTAINER" psql -c "CREATE USER $DB_USER WITH SUPERUSER PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
-                LAST_STATUS=$?
-                
-                if [ $LAST_STATUS -ne 0 ]; then
-                    ERROR "All user creation methods failed: $LAST_RESORT"
-                    echo -e "${RED}All user creation methods failed: $LAST_RESORT${RESET}"
-                    echo -e "${RED}Will attempt to continue, but database operations may fail...${RESET}"
-                else
-                    echo -e "${GREEN}User created with default PostgreSQL credentials${RESET}"
-                    INFO "User created with default PostgreSQL credentials"
-                    
-                    # Now set the password
-                    docker exec "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1
-                fi
-            else
-                echo -e "${GREEN}User created with alternative method${RESET}"
-                INFO "User created with alternative method"
-                
-                # Now set the password
-                PASS_SET_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "ALTER USER $DB_USER WITH PASSWORD '$DB_WORKING_PASSWORD';" 2>&1)
-                PASS_SET_STATUS=$?
-                
-                if [ $PASS_SET_STATUS -ne 0 ]; then
-                    ERROR "Failed to set password for new user: $PASS_SET_RESULT"
-                    echo -e "${RED}Failed to set password for new user: $PASS_SET_RESULT${RESET}"
-                else
-                    echo -e "${GREEN}Password set for new user${RESET}"
-                    INFO "Password set for new user"
-                fi
-            fi
+            return 1
         else
             echo -e "${GREEN}Database user $DB_USER created successfully${RESET}"
             INFO "Database user $DB_USER created successfully"
@@ -1221,7 +1147,7 @@ initialize_database() {
         if [ $PASS_UPDATE_STATUS -ne 0 ]; then
             ERROR "Failed to update user password: $PASS_UPDATE_RESULT"
             echo -e "${RED}Failed to update user password: $PASS_UPDATE_RESULT${RESET}"
-            echo -e "${YELLOW}Will attempt to continue, but database operations may fail...${RESET}"
+            return 1
         else
             echo -e "${GREEN}Password updated for existing user $DB_USER${RESET}"
             INFO "Password updated for existing user $DB_USER"
@@ -1262,19 +1188,16 @@ initialize_database() {
         if [ $DROP_STATUS -ne 0 ]; then
             ERROR "Failed to drop database: $DROP_RESULT"
             echo -e "${RED}Failed to drop database: $DROP_RESULT${RESET}"
-            echo -e "${YELLOW}Will attempt to continue by creating a new database anyway...${RESET}"
+            return 1
         else
             echo -e "${GREEN}Database dropped successfully${RESET}"
             INFO "Database dropped successfully"
         fi
-    else
-        echo -e "${YELLOW}Database '$DB_NAME' does not exist, proceeding with creation...${RESET}"
-        INFO "Database '$DB_NAME' does not exist, proceeding with creation..."
     fi
     
-    # Create a new database
-    echo -e "${YELLOW}Creating database '$DB_NAME' with owner '$DB_USER'...${RESET}"
-    INFO "Creating database '$DB_NAME' with owner '$DB_USER'..."
+    # Create new database
+    echo -e "${YELLOW}Creating new database '$DB_NAME'...${RESET}"
+    INFO "Creating new database '$DB_NAME'..."
     
     CREATE_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>&1)
     CREATE_STATUS=$?
@@ -1282,128 +1205,13 @@ initialize_database() {
     if [ $CREATE_STATUS -ne 0 ]; then
         ERROR "Failed to create database: $CREATE_RESULT"
         echo -e "${RED}Failed to create database: $CREATE_RESULT${RESET}"
-        echo -e "${YELLOW}Trying alternative approach to create database...${RESET}"
-        
-        # Try alternative approach with createdb command
-        ALT_RESULT=$(docker exec -u "$DB_ADMIN_USER" "$DB_CONTAINER" createdb -O "$DB_USER" "$DB_NAME" 2>&1)
-        ALT_STATUS=$?
-        
-        if [ $ALT_STATUS -ne 0 ]; then
-            ERROR "Alternative database creation also failed: $ALT_RESULT"
-            echo -e "${RED}Alternative database creation also failed: $ALT_RESULT${RESET}"
-            echo -e "${RED}Database initialization might not complete successfully${RESET}"
-        else
-            echo -e "${GREEN}Database created with alternative method${RESET}"
-            INFO "Database created with alternative method"
-        fi
+    return 1
     else
         echo -e "${GREEN}Database created successfully${RESET}"
         INFO "Database created successfully"
     fi
     
-    # Backup the original docker-compose.yml
-    cd "$INSTALL_DIR"
-    cp docker-compose.yml docker-compose.yml.bak
-    
-    # Temporarily modify docker-compose.yml to add initialization parameters
-    INFO "Temporarily modifying docker-compose.yml to include initialization parameters..."
-    echo -e "${YELLOW}Configuring Odoo service for database initialization...${RESET}"
-    
-    # Extract current command if it exists
-    CURRENT_CMD=$(grep -A1 "command:" docker-compose.yml | grep -v "command:" | sed 's/^[ \t]*//' || echo "")
-    
-    # Remove any existing command line
-    if grep -q "command:" docker-compose.yml; then
-        # Create a temporary file without the command line
-        grep -v "command:" docker-compose.yml > docker-compose.yml.tmp
-        mv docker-compose.yml.tmp docker-compose.yml
-    fi
-    
-    # Find the web service section and add our initialization command
-    sed -i "/web:/,/restart:/ s/restart: unless-stopped/restart: unless-stopped\n    command: odoo --stop-after-init --init=base,web --without-demo=all --load-language=en_US -d $DB_NAME --db_host=db --db_port=5432 --db_user=$DB_USER --db_password=$DB_WORKING_PASSWORD/" docker-compose.yml
-    
-    # Stop any running Odoo container
-    if docker ps | grep -q "$CONTAINER_NAME"; then
-        INFO "Stopping running Odoo container before initialization..."
-        docker stop "$CONTAINER_NAME" >/dev/null 2>&1
-    fi
-    
-    # Start containers with initialization parameters
-    INFO "Starting Odoo container with initialization parameters..."
-    echo -e "${CYAN}Running Odoo with initialization parameters...${RESET}"
-    docker compose up -d
-    
-    # Wait for initialization to complete (container will stop after initialization)
-    INFO "Waiting for initialization to complete..."
-    echo -e "${YELLOW}Waiting for initialization to complete (this may take several minutes)...${RESET}"
-    
-    # Set timeout for initialization (5 minutes should be enough)
-    TIMEOUT=300
-    start_time=$(date +%s)
-    
-    # Show spinner while waiting
-    echo -n "Initializing database "
-    while docker ps | grep -q "$CONTAINER_NAME"; do
-        for s in / - \\ \|; do
-            echo -ne "\rInitializing database $s"
-            sleep 0.5
-            
-            # Check if timeout reached
-            current_time=$(date +%s)
-            elapsed=$((current_time - start_time))
-            if [ $elapsed -gt $TIMEOUT ]; then
-                echo -e "\n${RED}Initialization timed out after $TIMEOUT seconds.${RESET}"
-                break 2
-            fi
-        done
-    done
-    echo -e "\r${GREEN}Initialization process completed!${RESET}"
-    
-    # Check if initialization was successful by looking at the container exit code
-    INIT_STATUS=$(docker inspect --format='{{.State.ExitCode}}' "$CONTAINER_NAME")
-    
-    # Restore original docker-compose.yml
-    INFO "Restoring original docker-compose.yml..."
-    echo -e "${YELLOW}Restoring original configuration...${RESET}"
-    mv docker-compose.yml.bak docker-compose.yml
-    
-    if [ "$INIT_STATUS" != "0" ]; then
-        ERROR "Database initialization failed with exit code $INIT_STATUS"
-        echo -e "${RED}Database initialization failed. Checking container logs...${RESET}"
-        
-        # Show container logs to help diagnose the issue
-        docker logs --tail 30 "$CONTAINER_NAME"
-        
-        # Restart the container with normal configuration
-        docker compose up -d
-        return 1
-    fi
-    
-    # Restart the container with normal configuration
-    INFO "Restarting Odoo container with normal configuration..."
-    echo -e "${YELLOW}Restarting Odoo with normal configuration...${RESET}"
-    docker compose up -d
-    
-    # Wait for container to be fully up
-    echo -e "${YELLOW}Waiting for Odoo container to fully start...${RESET}"
-    sleep 10
-    
-    # Verify database initialization by checking tables
-    INFO "Verifying database initialization..."
-    echo -e "${CYAN}Verifying database tables...${RESET}"
-    
-    # Count tables to verify initialization was successful
-    TABLE_COUNT=$(docker exec "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public';" 2>/dev/null | tr -d '[:space:]')
-    
-    if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 20 ]; then
-        ERROR "Database verification failed. Expected at least 20 tables, found: $TABLE_COUNT"
-        echo -e "${RED}Database validation failed. Only $TABLE_COUNT tables found (expected >20).${RESET}"
-    return 1
-    else
-        echo -e "${GREEN}${BOLD}✓${RESET} Database initialization completed successfully with $TABLE_COUNT tables."
-        INFO "Database initialization completed successfully with $TABLE_COUNT tables."
-        return 0
-    fi
+    return 0
 }
 
 # Check service health
