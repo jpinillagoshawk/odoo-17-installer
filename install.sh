@@ -425,16 +425,25 @@ extract_enterprise() {
             case $choice in
                 1)
                     # Option 1: Use existing enterprise addons folder
-                    local enterprise_path
-                    read -r -p "Enter the full path to your enterprise addons folder: " enterprise_path
+                    local enterprise_path_raw
+                    read -r -p "Enter the full path to your enterprise addons folder: " enterprise_path_raw
                     
                     # Handle Windows path conversion
-                    enterprise_path=$(echo "$enterprise_path" | tr '\\' '/')
+                    enterprise_path=$(echo "$enterprise_path_raw" | tr '\\' '/')
                     if [[ "$enterprise_path" =~ ^[A-Za-z]: ]]; then
                         drive_letter=$(echo "${enterprise_path:0:1}" | tr '[:upper:]' '[:lower:]')
                         enterprise_path="/$(echo "$drive_letter")/${enterprise_path:2}"
                         # Clean up double slashes if present
                         enterprise_path=$(echo "$enterprise_path" | sed 's|//|/|g')
+                    fi
+                    
+                    # Create Docker-compatible path for docker-compose.yml (C:/XXX format)
+                    local enterprise_path_docker_compose
+                    if [[ "$enterprise_path" =~ ^/([a-z])/(.*)$ ]]; then
+                        drive_letter=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+                        enterprise_path_docker_compose="${drive_letter}:/${BASH_REMATCH[2]}"
+                    else
+                        enterprise_path_docker_compose="$enterprise_path"
                     fi
                     
                     # Validate the path
@@ -460,11 +469,8 @@ extract_enterprise() {
                     # First, create a backup of the original docker-compose.yml
                     cp "$SETUP_DIR/docker-compose.yml" "$SETUP_DIR/docker-compose.yml.bak"
                     
-                    # Safely escape the path for sed
-                    local escaped_path=$(echo "$enterprise_path" | sed 's/[\/&]/\\&/g')
-                    
                     # Modify the docker-compose.yml with safer sed approach
-                    sed -i "s|      - \./enterprise:/mnt/enterprise|      - $escaped_path:/mnt/enterprise|g" "$SETUP_DIR/docker-compose.yml"
+                    sed -i "s|      - \./enterprise:/mnt/enterprise|      - $enterprise_path_docker_compose:/mnt/enterprise|g" "$SETUP_DIR/docker-compose.yml"
                     
                     # Create an empty enterprise directory for structure completeness
                     mkdir -p "$INSTALL_DIR/enterprise"
