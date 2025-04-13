@@ -1,26 +1,26 @@
-version: '3.1'
 services:
   web:
     image: odoo:17.0
-    container_name: odoo17-{client_name}
+    container_name: {odoo_container_name}
     depends_on:
       - db
     ports:
       - "0.0.0.0:{odoo_port}:8069"
+      - "0.0.0.0:8072:8072"
     volumes:
       - ./config:/etc/odoo
       - ./volumes/odoo-data:/var/lib/odoo
       - ./enterprise:/mnt/enterprise
       - ./addons:/mnt/extra-addons
       - ./logs:/var/log/odoo
-      - ./filestore:/var/lib/odoo/filestore
+    entrypoint: []
+    command: ["/usr/bin/odoo", "--workers=0", "--db_host=db", "--db_port={db_port}", "--db_user={db_user}", "--db_password={client_password}", "--database={odoo_db_name}", "--http-interface=0.0.0.0", "--gevent-port=8072", "--max-cron-threads=1"]
     environment:
       - HOST=db
       - PORT={db_port}
-      - USER=odoo
+      - USER={db_user}
       - PASSWORD={client_password}
-      - PROXY_MODE=True
-    command: --db_host=db --db_user=odoo --db_password={client_password} --addons-path=/mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+      - PGDATABASE={odoo_db_name}
     logging:
       driver: "json-file"
       options:
@@ -30,10 +30,13 @@ services:
 
   db:
     image: postgres:15
-    container_name: db-{client_name}
+    container_name: {db_container_name}
+    command: ["postgres", "-c", "log_statement=none", "-c", "log_min_messages=warning", "-c", "log_min_error_statement=error"]
     environment:
+      - POSTGRES_DB={odoo_db_name}
       - POSTGRES_PASSWORD={client_password}
-      - POSTGRES_USER=odoo
+      - PGDATABASE={odoo_db_name}
+      - POSTGRES_USER={db_user}
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - ./volumes/postgres-data:/var/lib/postgresql/data/pgdata

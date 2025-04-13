@@ -1,12 +1,11 @@
-
-
-
-INSTALL_DIR="/home/ubuntu/repos/rincondelmotor-odoo-17"
+#!/bin/bash
+tput smcup
+INSTALL_DIR="{install_dir}"
 STAGING_DIR="$INSTALL_DIR/staging"
 ADDONS_DIR="$INSTALL_DIR/addons"
 GIT_CONFIG_FILE="$INSTALL_DIR/.git_config"
 MAIN_BRANCH="main"
-TOKEN_ENV_VAR="jpinillagoshawk_github_token"
+TOKEN_ENV_VAR="github_token"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,6 +15,11 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
+
+# Function to clear screen while preserving history
+clear_screen() {
+    printf "\033c"  # Reset terminal without clearing scrollback
+}
 
 usage() {
     echo -e "${BOLD}Git Panel for Odoo 17${NC}"
@@ -29,6 +33,7 @@ usage() {
     echo -e "  ${CYAN}pull${NC} [branch] - Pull and merge changes from a branch"
     echo -e "  ${CYAN}list-branches${NC} - List all available branches"
     echo -e "  ${CYAN}help${NC}          - Show this help message"
+    tput rmcup
     exit 1
 }
 
@@ -274,6 +279,43 @@ fetch_remote_changes() {
     git fetch --all
     
     echo -e "${GREEN}Remote changes fetched successfully.${NC}"
+    
+    # Use the container name directly from parameters used during installation
+    # This matches what's in docker-compose.yml
+    container_name="odoo17-$(basename "$INSTALL_DIR" | sed 's/-odoo-17$//')"
+    
+    echo -e "${BLUE}Checking for requirements.txt files in modules...${NC}"
+    found_requirements=false
+    
+    # Find all requirements.txt files in the addons directory
+    for req_file in $(find . -name "requirements.txt" -type f); do
+        found_requirements=true
+        module_path=$(dirname "$req_file")
+        module_name=$(echo "$module_path" | sed 's/^\.\///')
+        
+        echo -e "Installing requirements for module: ${CYAN}${module_name}${NC}"
+        
+        # Copy requirements file to container's tmp directory
+        docker cp "$req_file" "$container_name:/tmp/$(basename "$module_path")_requirements.txt" && \
+        # Install requirements inside the container
+        docker exec "$container_name" pip3 install -r "/tmp/$(basename "$module_path")_requirements.txt" || \
+        echo -e "${YELLOW}Warning: Could not install requirements for $module_name inside container${NC}"
+    done
+    
+    if [ "$found_requirements" = false ]; then
+        echo -e "${YELLOW}No requirements.txt files found in modules.${NC}"
+    else
+        echo -e "${GREEN}Module requirements installed inside Odoo container.${NC}"
+    fi
+    
+    echo -e "${BLUE}Restarting Odoo container: ${CYAN}${container_name}${NC}${NC}"
+    if docker restart "$container_name"; then
+        echo -e "${GREEN}Odoo container restarted successfully.${NC}"
+    else
+        echo -e "${YELLOW}Warning: Could not restart Odoo container. It may not be running or you may need sudo privileges.${NC}"
+        echo -e "You can restart it manually with: ${CYAN}docker restart $container_name${NC}"
+    fi
+    
     return 0
 }
 
@@ -537,6 +579,7 @@ show_main_menu() {
             ;;
         0)
             echo -e "${GREEN}Exiting Git Panel.${NC}"
+            tput rmcup
             exit 0
             ;;
         *)
@@ -585,5 +628,5 @@ else
             ;;
     esac
 fi
-
+tput rmcup
 exit 0

@@ -1,222 +1,366 @@
-# Odoo 17 Enterprise Installer with SSL/HTTPS Support
+# Odoo 17 Enterprise - {client_name} Installation
 
-A comprehensive installer for Odoo 17 Enterprise that automates deployment with Docker, includes SSL/HTTPS configuration, and provides robust backup and maintenance utilities.
+_Last Updated: January 2025_
 
-## Project Overview
+This repository contains the Docker-based installation of Odoo 17 Enterprise for {client_name}. The setup includes automated installation, backup procedures, and maintenance guidelines.
 
-This project creates customized Odoo 17 Enterprise deployment packages for clients. It provides:
+## 📋 Table of Contents
+- [Quick Start](#quick-start)
+- [System Requirements](#system-requirements)
+- [Installation](#installation)
+- [Directory Structure](#directory-structure)
+- [Backup Management](#backup-management)
+- [Staging Management](#staging-management)
+- [Configuration](#configuration)
+- [Maintenance](#maintenance)
+- [Troubleshooting](#troubleshooting)
+- [Security](#security)
+- [Support](#support)
 
-- Automated installation with pre-configured Docker setup
-- SSL/HTTPS configuration (direct SSL or reverse proxy with Nginx)
-- Comprehensive backup and restore functionality
-- Client-specific setups with parameter templating
-- Maintenance and monitoring utilities
+## Quick Start 🚀
 
-## Directory Structure
-
-```
-odoo_17_installer/
-├── {client_name}-odoo-17-setup/  # Template directory with placeholder files
-│   ├── README.md                 # Usage instructions for end users
-│   ├── SSL-README.md             # SSL setup instructions
-│   ├── backup.sh                 # Backup/restore utility
-│   ├── config/                   # Configuration files
-│   ├── direct-ssl-config.conf    # SSL configuration for direct SSL
-│   ├── docker-compose.yml        # Docker container configuration
-│   ├── install.sh                # Main installation script
-│   ├── requirements.txt          # Python dependencies
-│   ├── ssl-config.conf.template  # SSL configuration template
-│   ├── ssl-setup.sh              # SSL configuration script
-│   └── staging.sh                # Staging environment setup
-├── create_client_setup.py        # Client setup generator script
-└── odoo-17-setup.conf            # Sample configuration file
-```
-
-## Key Components
-
-### 1. Client Setup Generator (`create_client_setup.py`)
-
-This script creates customized Odoo 17 setup packages for specific clients:
-
-- Replaces placeholders like `{client_name}` and `{client_password}` in all template files
-- Creates directory structure for client-specific deployment
-- Processes configuration templates for SSL, Docker, and Odoo
-
-**Usage:**
 ```bash
-python create_client_setup.py <config_file>
+# 1. Clone and install
+
+# From your local pc cmd window:
+scp -r "<path to local install>/*" {user}@{ip}:{path_to_install}
+
+# From your remote ubuntu environment:
+cd {path_to_install}
+scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" {user}@{ip}:{path_to_install}
+
+# In your local server
+cd {install_dir}
+chmod +x install.sh && sudo -E ./install.sh
+
+# 2. Create backup
+sudo ./backup.sh backup daily
+
+# 3. Create staging (optional)
+sudo ./staging.sh create
 ```
 
-**Configuration File Format:**
+## System Requirements 🔧
+
+- **Operating System**: Linux/Unix-based system or Windows 10+ (requires Git Bash or WSL to run .sh files)
+- **Docker**: Engine 20.10.x+ and Compose v2.x+
+- **Memory**: 4GB minimum (8GB recommended)
+- **Storage**: 20GB+ free space
+- **Network**: Port {odoo_port} available
+- **Python**: 3.8 or newer (for staging management)
+
+## Installation 📥
+
+<details>
+<summary>Detailed Installation Steps</summary>
+
+1. Clone this repository to existing folder `{path_to_install}`:
+   ```bash
+   scp -r "<path to local install>/*" {user}@{ip}:{path_to_install}
+   ```
+
+2. Place the Odoo Enterprise .deb file:
+   ```bash
+   scp -r "<path to enterprise .deb file>/odoo_17.0+e.latest_all.deb" {user}@{ip}:{path_to_install}
+   ```
+
+3. Run installation:
+   ```bash
+   cd {install_dir}
+   chmod +x install.sh && sudo -E ./install.sh
+   ```
+</details>
+
+## Directory Structure 📁
+
 ```
-client_name=acme
-client_password=acme2024
-user=ubuntu
-ip=195.190.194.108
-odoo_port=8069
-db_port=5432
-db_user=odoo
-path_to_install=/opt
+{path_to_install}/
+├── addons/            # Custom addons
+├── backups/           # Backup storage
+│   ├── daily/         # Daily backups
+│   └── monthly/       # Monthly backups
+├── config/            # Configuration files
+│   └── odoo.conf      # Odoo configuration
+├── enterprise/        # Enterprise addons
+├── logs/              # Log files
+├── staging/           # Staging environments
+│   └── staging/       # Default staging instance
+├── volumes/           # Docker volumes
+│   ├── odoo-data/     # Odoo filestore
+│   └── postgres-data/ # PostgreSQL data
+├── backup.sh          # Backup/restore script
+├── docker-compose.yml # Docker services config
+├── install.sh         # Installation script
+├── staging.py         # Staging management script
+└── README.md          # This file
 ```
 
-### 2. Installation Script (`install.sh`)
+## Backup Management 💾
 
-The main installation script that:
-
-- Validates system requirements
-- Sets up Docker containers for Odoo and PostgreSQL
-- Configures the database and Odoo parameters
-- Sets up scheduled backups
-- Provides colorful, user-friendly console output
-- Includes pre-installation analysis and validation
-
-### 3. SSL Setup (`ssl-setup.sh`)
-
-Handles SSL certificate acquisition and configuration with support for:
-
-- Let's Encrypt certificates (automatic)
-- Manual certificates (user-provided)
-- Direct SSL (Odoo handles SSL)
-- Proxy SSL (Nginx as reverse proxy)
-
-Uses configuration from `ssl-config.conf` and template files.
-
-### 4. Backup Utility (`backup.sh`)
-
-Provides backup and restore functionality:
-
-- Creates daily and monthly backups
-- Backs up database and filestore
-- Can restore from local backups or Odoo.sh exports
-- Includes backup rotation and cleanup
-
-## Template Processing
-
-The system uses a templating approach:
-
-1. Template files use placeholders like `{client_name}` and `{client_password}`
-2. The `create_client_setup.py` script replaces these with actual values
-3. Key template files include:
-   - `direct-ssl-config.conf`
-   - `ssl-config.conf.template`
-   - `docker-compose.yml`
-   - Configuration files in the `config/` directory
-
-## Install Process
-
-1. Modify client configuration file `odoo-17-setup.conf` with your client parameters
-2. Run the setup file:
-   ```bash
-   python create_client_setup.py odoo-17-setup.conf
-   ```
-3. Download odoo_17.0+e.latest_all.deb and place it into <path_to_install>/{client_name}-odoo-17/
-   e.g. windows command to send the file through ssh with cmd:
-   ```bash
-   pscp -pw <ssh_password> <path_to_local_file> <user>@<ssh_ip>:<path_to_target_folder>
-   ```
-4. Run the installation script:
-   ```bash
-   cd <path_to_install>/{client_name}-odoo-17
-   sudo chmod +x install.sh && sudo  -E ./install.sh
-   ```
-   This will automatically start Docker containers for a plug-and-play experience.
-5. Configure SSL (if needed):
-   ```bash
-   chmod +x ssl-setup.sh && sudo -E ./ssl-setup.sh
-   ```
-
-## Backup and Restore
+<details>
+<summary>Backup Creation and Management</summary>
 
 ### Creating Backups
 ```bash
-./backup.sh backup daily    # Create daily backup
-./backup.sh backup monthly  # Create monthly backup
+# Create daily backup
+sudo ./backup.sh backup daily
+
+# Create monthly backup
+sudo ./backup.sh backup monthly
 ```
 
-### Restoring Backups
+**Backup Contents**:
+- Database dump (PostgreSQL custom format)
+- Complete filestore directory
+- Filestore path list for cleanup
+
+**Storage Locations**:
+- Daily: `{install_dir}/backups/daily/backup_YYYYMMDD_HHMMSS.zip`
+- Monthly: `{install_dir}/backups/monthly/backup_YYYYMMDD_HHMMSS.zip`
+
+### Automated Schedule
+- Daily: 3:00 AM (keeps 7 days)
+- Monthly: 2:00 AM on 1st (keeps 6 months)
+</details>
+
+<details>
+<summary>Restore Procedures</summary>
+
+### Restore Options
+
+1. Interactive (Recommended):
+   ```bash
+   sudo ./backup.sh restore
+   ```
+
+2. Direct Path:
+   ```bash
+   sudo ./backup.sh restore {install_dir}/backups/daily/backup_YYYYMMDD_HHMMSS.zip
+   ```
+
+### Backup Management
 ```bash
-./backup.sh restore                      # Interactive restore
-./backup.sh restore /path/to/backup.zip  # Restore specific backup
+# List backups
+sudo ./backup.sh list
+
+# Cleanup old backups
+sudo find {install_dir}/backups/daily {install_dir}/backups/monthly -type f -name "backup_*.zip" ! -name "$(ls -t {install_dir}/backups/daily/backup_*.zip {install_dir}/backups/monthly/backup_*.zip 2>/dev/null | head -n1 | xargs basename)" -delete
+```
+</details>
+
+## Staging Management 🔄
+
+<details>
+<summary>Staging Commands and Structure</summary>
+
+The installation includes a staging management system that allows you to create, manage, and destroy staging environments for development and testing purposes.
+
+### Staging Commands
+
+1. Create staging environments:
+```bash
+# Create first staging (named "staging")
+sudo ./staging.sh create
+
+# Create additional staging (auto-named "staging-2", etc.)
+sudo ./staging.sh create
+
+# Create staging with specific name
+sudo ./staging.sh create staging-xxx
 ```
 
-The restore functionality works with:
-- Local backups created by the backup.sh script
-- Odoo.sh exported backups (containing dump.sql and filestore directory)
+2. List and manage stagings:
+```bash
+# List all staging environments
+sudo ./staging.sh list
 
-## Modifying the Code
+# Start a staging
+sudo ./staging.sh start staging
 
-### Adding New Template Files
+# Stop a staging
+sudo ./staging.sh stop staging
 
-1. Add the file to the template directory (`{client_name}-odoo-17-setup/`)
-2. Update `FILES_TO_COPY` in `create_client_setup.py` if needed
-3. Use `{client_name}` and `{client_password}` placeholders for dynamic values
+# Delete a staging
+sudo ./staging.sh delete staging
 
-### Modifying Installation Process
+# Update staging from production
+sudo ./staging.sh update staging
 
-The `install.sh` script is structured in modular functions:
+# Clean up staging environments
+sudo ./staging.sh cleanup all          # Remove all staging environments
+sudo ./staging.sh cleanup staging-2    # Remove specific staging environment
+```
 
-- `check_requirements()`: System requirement validation
-- `setup_files()`: File and directory setup
-- `configure_docker()`: Docker configuration
-- `create_backup_script()`: Backup script setup
+### Port Allocation
 
-Edit the relevant function to modify specific aspects of installation.
+Staging environments use automatic port allocation:
+- First staging (staging): {odoo_port} (web), 8072 (longpolling), {db_port} (postgres)
+- Additional stagings: Ports increment by 10 for each instance
+  - staging-2: 8079, 8082, 5442
+  - staging-3: 8089, 8092, 5452
+  etc.
 
-### SSL Configuration
+### Directory Structure
 
-The SSL setup is controlled by:
+Each staging environment is created under `{install_dir}/staging/` with the following structure:
+```
+{install_dir}/staging/
+├── staging/           # First staging environment
+│   ├── config/       # Configuration files
+│   ├── enterprise/   # Enterprise addons
+│   ├── addons/      # Custom addons
+│   ├── volumes/     # Docker volumes
+│   │   ├── odoo-data/     # Filestore
+│   │   └── postgres-data/ # Database
+│   ├── logs/        # Log files
+│   └── docker-compose.yml
+└── staging-2/       # Second staging environment
+    └── ...
+```
 
-1. `ssl-config.conf.template` - Main configuration template
-2. `direct-ssl-config.conf` - Direct SSL configuration template
-3. `ssl-setup.sh` - Implementation script with functions:
-   - `configure_direct_ssl()`: Configure Odoo for direct SSL
-   - `configure_nginx()`: Configure Nginx as reverse proxy
-   - `obtain_certificate()`: Certificate acquisition (Let's Encrypt or manual)
+### Important Notes
+- Each staging has isolated:
+  - Docker containers
+  - Database
+  - Port allocations
+  - Configuration
+  - Volume data
+- Stagings are production clones
+- Port checks are automatic
+</details>
 
-## Implementation Details
+## Configuration ⚙️
 
-### Parameter Substitution
+<details>
+<summary>Database and Service Configuration</summary>
 
-- Template files use `{client_name}`, `{client_password}`, and other placeholders
-- The `modify_file()` function in `create_client_setup.py` handles replacements
-- Special files like `ssl-config.conf.template` have custom processing
+### Database Settings
+```yaml
+Database Name: {odoo_db_name}
+User: {db_user}
+Password: {client_password}
+Admin Password: {client_password}
+```
 
-### SSL Configuration Logic
+### Docker Services
+```yaml
+Odoo Web:
+  Container: {odoo_container_name}
+  Port: {odoo_port}
+  Paths:
+    - Enterprise: /mnt/enterprise
+    - Custom: /mnt/extra-addons
+  
+PostgreSQL:
+  Container: {db_container_name}
+  Version: 15
+  Port: {db_port}
+```
+</details>
 
-1. User runs `ssl-setup.sh`
-2. Script loads configuration from `ssl-config.conf`
-3. Verifies system requirements
-4. Obtains SSL certificate (Let's Encrypt or manual)
-5. Configures SSL based on type:
-   - Direct: Updates Odoo config using `direct-ssl-config.conf`
-   - Proxy: Sets up Nginx as reverse proxy
+## Maintenance 🛠️
 
-### Backup Strategy
+<details>
+<summary>Maintenance Procedures</summary>
 
-- Backups include database dumps and filestore content
-- Rotation: Daily backups kept for 7 days, monthly for 6 months
-- Database restored using appropriate PostgreSQL tool based on format
+### Updating Odoo
+1. Stop the containers:
+   ```bash
+   cd {install_dir}
+   docker compose down
+   ```
 
-## Troubleshooting
+2. Update the image in docker-compose.yml
+3. Pull new images:
+   ```bash
+   docker compose pull
+   ```
 
-Common issues and solutions:
+4. Start services:
+   ```bash
+   docker compose up -d
+   ```
 
-1. **Certificate acquisition failures:**
-   - Check port 80 is open for HTTP challenge
-   - Verify domain DNS resolution
+### Log Management
+- Location: `{install_dir}/logs/`
+- Rotation: 100MB max, 3 files
 
-2. **Database restore issues:**
-   - Ensure PostgreSQL version compatibility
-   - Check for sufficient disk space
+### Database Maintenance
+```bash
+# Access PostgreSQL
+docker exec -it {db_container_name} psql -U {db_user} {odoo_db_name}
 
-3. **Docker issues:**
-   - Verify Docker and Docker Compose installation
-   - Check for port conflicts
+# Common queries
+SELECT pg_size_pretty(pg_database_size('{odoo_db_name}'));
+SELECT * FROM pg_stat_activity;
+```
+</details>
 
-## License
+## Troubleshooting 🔍
 
-[Specify your license here]
+<details>
+<summary>Common Issues and Solutions</summary>
 
-## Contributing
+### Docker Issues
+```bash
+# Service status
+docker compose ps
+docker compose logs -f web
+docker compose logs -f db
 
-[Specify contribution guidelines]
+# Network check
+docker exec {odoo_container_name} ping db
+```
+
+### Permission Issues
+```bash
+sudo chown -R 101:101 {install_dir}/volumes/odoo-data
+sudo chmod -R 777 {install_dir}/volumes/odoo-data
+```
+
+### Database Connection
+- Check container status
+- Verify passwords in:
+  - docker-compose.yml
+  - odoo.conf
+  - Environment variables
+</details>
+
+## Security 🔐
+
+<details>
+<summary>Security Guidelines</summary>
+
+1. **File Permissions**
+   - UID 101 (odoo user) ownership
+   - Restricted backup access
+
+2. **Network Security**
+   - Firewall port {odoo_port}
+   - Use SSL reverse proxy
+
+3. **Password Management**
+   - Change defaults
+   - Use strong passwords
+   - Secure storage
+</details>
+
+## Support 📞
+
+- **Documentation**
+  - [Odoo](https://www.odoo.com/documentation/17.0/)
+  - [Docker](https://docs.docker.com/)
+  - [PostgreSQL](https://www.postgresql.org/docs/15/)
+
+- **Contact**
+  - Technical Support (as of January 2025): javier.pinilla@goshawkanalytics.com
+  - Emergency: jorge.huescar@goshawkanalytics.com
+
+## License 📄
+
+This installation is covered by your Odoo Enterprise subscription. Ensure compliance with terms and conditions.
+
+## Change Log 📝
+
+- 2025-01: Initial documentation
+- [Add future changes here] 
