@@ -253,7 +253,7 @@ def modify_file(file_path, config):
     content = content.replace('{path_to_install}', config['path_to_install'])
     content = content.replace('{odoo_container_name}', config['odoo_container_name'])
     content = content.replace('{db_container_name}', config['db_container_name'])
-    content = content.replace('odoo_db_name', config['odoo_db_name'])
+    content = content.replace('{odoo_db_name}', config['odoo_db_name'])
     content = content.replace('{install_dir}', config['install_dir'])
 
     if 'ip' in config:
@@ -313,9 +313,9 @@ db_host = db
 db_port = {db_port}
 db_user = {db_user}
 db_password = {client_password}
-db_name = odoo_db_name
-dbfilter = odoo_db_name
-database = odoo_db_name
+db_name = {odoo_db_name}
+dbfilter = {odoo_db_name}
+database = {odoo_db_name}
 addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
 data_dir = /var/lib/odoo
 session_dir = /var/lib/odoo/sessions
