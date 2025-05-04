@@ -80,16 +80,19 @@ DB_PORT="{db_port}"
 # Display banner
 show_banner() {
     echo -e "${BG_BLUE}${WHITE}${BOLD}"
-    echo "  ___       _                   _  ______ "
-    echo " / _ \   __| |  ___    ___     / ||____ / "
-    echo "| | | | / _\` | / _ \  / _ \   / /    / /  "
-    echo "| |_| || (_| || (_) || (_) | / /    / /   "
-    echo " \___/  \__,_| \___/  \___/ /_/    /_/    "
-    echo "                                          "
+    echo "  ___                          ___    ___   " && \
+    echo " / _ \      _                 /   |  / _ \\ " && \
+    echo "| | | |  __| |  ___    ___   /_/| | | (_) | " && \
+    echo "| | | | / _\` | / _ \  / _ \     | | |  _  | " && \
+    echo "| |_| || (_| || (_) || (_) |    | | | (_) | " && \
+    echo " \___/  \__,_| \___/  \___/     |_|  \\___/ " && \
+    echo "                                            " && \
     echo -e "${RESET}"
     echo -e "${CYAN}${BOLD}Installation Script for {client_name}${RESET}"
     echo -e "${YELLOW}Property of Azor Data SL (Spain)${RESET}"
     echo -e "${DIM}Created: $(date)${RESET}"
+
+    
     echo
 }
 
@@ -389,15 +392,15 @@ check_prerequisites() {
     
     # Check port availability (use both netstat and ss if available)
     if command -v netstat &>/dev/null; then
-        validate "Port 8069 (netstat)" "! netstat -tuln 2>/dev/null | grep -q :8069" "Port 8069 is already in use"
+        validate "Port $ODOO_PORT (netstat)" "! netstat -tuln 2>/dev/null | grep -q :$ODOO_PORT" "Port $ODOO_PORT is already in use"
     elif command -v ss &>/dev/null; then
-        validate "Port 8069 (ss)" "! ss -tuln 2>/dev/null | grep -q :8069" "Port 8069 is already in use"
+        validate "Port $ODOO_PORT (ss)" "! ss -tuln 2>/dev/null | grep -q :$ODOO_PORT" "Port $ODOO_PORT is already in use"
     else
-        log WARNING "Neither netstat nor ss commands are available to check port 8069 availability"
+        log WARNING "Neither netstat nor ss commands are available to check port $ODOO_PORT availability"
         # Windows fallback for checking port
         if [ "$IS_WINDOWS" = "true" ] && command -v netstat &>/dev/null; then
-            if netstat -ano | grep -q ":8069"; then
-                log ERROR "Port 8069 is already in use"
+            if netstat -ano | grep -q ":$ODOO_PORT"; then
+                log ERROR "Port $ODOO_PORT is already in use"
                 exit 1
             fi
         fi
@@ -437,14 +440,8 @@ extract_enterprise() {
                         enterprise_path=$(echo "$enterprise_path" | sed 's|//|/|g')
                     fi
                     
-                    # Create Docker-compatible path for docker-compose.yml (C:/XXX format)
-                    local enterprise_path_docker_compose
-                    if [[ "$enterprise_path" =~ ^/([a-z])/(.*)$ ]]; then
-                        drive_letter=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
-                        enterprise_path_docker_compose="${drive_letter}:/${BASH_REMATCH[2]}"
-                    else
-                        enterprise_path_docker_compose="$enterprise_path"
-                    fi
+                    # Create Docker-compatible path for docker-compose.yml (/mnt/c/... format)
+                    enterprise_path_docker_compose="${enterprise_path}"
                     
                     # Validate the path
                     if [ ! -d "$enterprise_path" ]; then
@@ -470,7 +467,7 @@ extract_enterprise() {
                     cp "$SETUP_DIR/docker-compose.yml" "$SETUP_DIR/docker-compose.yml.bak"
                     
                     # Modify the docker-compose.yml with safer sed approach
-                    sed -i "s|      - \./enterprise:/mnt/enterprise|      - $enterprise_path_docker_compose:/mnt/enterprise|g" "$SETUP_DIR/docker-compose.yml"
+                    sed -i "s|      - \./enterprise:/mnt/enterprise|      - ../odooV17/enterprise-17.0:/mnt/enterprise|g" "$SETUP_DIR/docker-compose.yml"
                     
                     # Create an empty enterprise directory for structure completeness
                     mkdir -p "$INSTALL_DIR/enterprise"
@@ -1006,6 +1003,30 @@ initialize_database() {
     docker stop $ODOO_CONTAINER_NAME >/dev/null 2>&1 || true
     docker rm $ODOO_CONTAINER_NAME >/dev/null 2>&1 || true
     
+    # Ensure proper permissions on the filestore directory
+    log INFO "Setting correct permissions for filestore directory..."
+    mkdir -p "$INSTALL_DIR/volumes/odoo-data/filestore/$DB_NAME"
+    
+    if [ "$IS_WINDOWS" = "true" ]; then
+        log INFO "On Windows: Volume permissions are managed by the host filesystem"
+        log INFO "Creating directory structure without changing permissions..."
+        
+        # On Windows, just ensure the directories exist without trying to change permissions
+        docker run --rm \
+            -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
+            odoo:17.0 \
+            sh -c "mkdir -p /var/lib/odoo/filestore/$DB_NAME" || true
+            
+        # Provide guidance for the user
+        log INFO "For Windows users:"
+        log INFO "1. Make sure your Windows user has full control permissions on $INSTALL_DIR/volumes"
+        log INFO "2. Docker volume mounts on Windows have different permission behavior than Linux"
+        log INFO "3. If database operations fail, try running fix-permissions.sh or restart Docker Desktop"
+    else
+        chmod -R 777 "$INSTALL_DIR/volumes/odoo-data" 2>/dev/null || log WARNING "Could not set permissions for data directory"
+        chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data" 2>/dev/null || log WARNING "Could not set ownership for data directory"
+    fi
+    
     # Initialize database with base module
     log INFO "Initializing database with base module..."
     docker run --rm --name $ODOO_CONTAINER_NAME \
@@ -1022,6 +1043,7 @@ initialize_database() {
         -e PGDATABASE=$DB_NAME \
         odoo:17.0 \
         -- --database $DB_NAME --init base --without-demo=all --stop-after-init --log-level=error > /dev/null 2>&1
+    
     # Check if initialization was successful
     local init_status=$?
     
@@ -1060,7 +1082,7 @@ check_service_health() {
                 log INFO "Database $DB_NAME exists"
                 
                 # Check if Odoo web interface is responding
-                if curl -s --max-time 5 http://localhost:8069/web/database/selector > /dev/null; then
+                if curl -s --max-time 5 http://localhost:$ODOO_PORT/web/database/selector > /dev/null; then
                     log INFO "Odoo is fully operational"
                     return 0
                 else
@@ -1103,7 +1125,7 @@ verify_installation() {
     fi
     
     # Check if Odoo web interface is accessible
-    local response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8069/web/login)
+    local response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$ODOO_PORT/web/login)
     
     if [ "$response" != "200" ]; then
         log ERROR "Web interface verification failed: Got response code $response"
@@ -1186,9 +1208,25 @@ verify_permissions() {
         mkdir -p "$INSTALL_DIR/volumes/odoo-data/sessions"
     fi
     
+    # Create database-specific filestore directory
+    if [ ! -d "$INSTALL_DIR/volumes/odoo-data/filestore/$DB_NAME" ]; then
+        log INFO "Database filestore directory does not exist, creating it..."
+        mkdir -p "$INSTALL_DIR/volumes/odoo-data/filestore/$DB_NAME"
+    fi
+    
     # Set correct permissions
-    log INFO "Setting correct permissions for Odoo sessions directory..."
+    log INFO "Setting correct permissions for Odoo directories..."
     set_permissions "$INSTALL_DIR/volumes/odoo-data/sessions"
+    set_permissions "$INSTALL_DIR/volumes/odoo-data/filestore"
+    set_permissions "$INSTALL_DIR/volumes/odoo-data/filestore/$DB_NAME"
+    
+    # Set permissions for the entire data directory for good measure
+    if [ "$IS_WINDOWS" = "true" ]; then
+        log INFO "On Windows: Skipping chmod/chown for data directory (not fully supported in Git Bash)"
+    else
+        chmod -R 777 "$INSTALL_DIR/volumes/odoo-data" 2>/dev/null || log WARNING "Could not set permissions for data directory"
+        chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data" 2>/dev/null || log WARNING "Could not set ownership for data directory"
+    fi
     
     # Verify other critical directories
     for dir in "$INSTALL_DIR/volumes/odoo-data/filestore" "$INSTALL_DIR/logs" "$INSTALL_DIR/config"; do
@@ -1239,7 +1277,58 @@ copy_necessary_files() {
     chmod +x "$INSTALL_DIR/git_panel.sh"
     validate "git panel script" "[ -x '$INSTALL_DIR/git_panel.sh' ]" "Failed to copy git_panel.sh"
     
+    # Copy fix-permissions.sh
+    log INFO "Copying permissions fix script to $INSTALL_DIR..."
+    cp "$SETUP_PATH/fix-permissions.sh" "$INSTALL_DIR/"
+    chmod +x "$INSTALL_DIR/fix-permissions.sh"
+    validate "permissions fix script" "[ -x '$INSTALL_DIR/fix-permissions.sh' ]" "Failed to copy fix-permissions.sh"
+    
     log INFO "Necessary files copied successfully"
+}
+
+# Fix filestore permissions for database operations
+fix_filestore_permissions() {
+    log INFO "Fixing filestore permissions for database operations..."
+    
+    if [ "$IS_WINDOWS" = "true" ]; then
+        log INFO "On Windows: Volume permissions must be managed by the host filesystem"
+        
+        # Try to use a running container first
+        if docker ps | grep -q "$ODOO_CONTAINER_NAME"; then
+            log INFO "Using running container to create necessary directories..."
+            
+            # Just create the directories without trying to change permissions
+            docker exec $ODOO_CONTAINER_NAME sh -c "mkdir -p /var/lib/odoo/filestore" || true
+        else
+            # No running container, use temporary container
+            log INFO "No running container found, using temporary container..."
+            
+            docker run --rm \
+                -v "$INSTALL_DIR/volumes/odoo-data:/var/lib/odoo" \
+                odoo:17.0 \
+                sh -c "mkdir -p /var/lib/odoo/filestore" || true
+        fi
+        
+        # On Windows, we need to configure permissions from Windows itself
+        log INFO "For Windows Docker volumes, follow these steps to fix permissions:"
+        log INFO "1. Open Explorer and navigate to: $INSTALL_DIR/volumes/odoo-data"
+        log INFO "2. Right-click on 'filestore' folder → Properties → Security tab"
+        log INFO "3. Click 'Edit' and then 'Add'"
+        log INFO "4. Enter 'Everyone' and click 'Check Names' → OK"
+        log INFO "5. Select 'Everyone' and check 'Full control' → Apply → OK"
+        log INFO "6. Restart Docker Desktop and the Odoo container"
+        
+        # Alternative solution using docker-compose down/up
+        log INFO ""
+        log INFO "Alternatively, try the following command sequence to recreate containers:"
+        log INFO "cd $INSTALL_DIR && docker-compose down && docker-compose up -d"
+    else
+        # Directly fix permissions on the host
+        chmod -R 777 "$INSTALL_DIR/volumes/odoo-data/filestore" 2>/dev/null || log WARNING "Could not set permissions for filestore directory"
+        chown -R 101:101 "$INSTALL_DIR/volumes/odoo-data/filestore" 2>/dev/null || log WARNING "Could not set ownership for filestore directory"
+    fi
+    
+    log INFO "Filestore permissions process completed"
 }
 
 # Main installation process
@@ -1266,6 +1355,9 @@ main() {
     check_service_health
     verify_installation
     set_report_url
+    
+    # Fix filestore permissions after installation
+    fix_filestore_permissions
     
     if [ $? -eq 0 ]; then
         display_cleanup_message

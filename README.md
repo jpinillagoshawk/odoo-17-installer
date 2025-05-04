@@ -194,7 +194,7 @@ sudo ./staging.sh cleanup staging-2    # Remove specific staging environment
 ### Port Allocation
 
 Staging environments use automatic port allocation:
-- First staging (staging): {odoo_port} (web), 8072 (longpolling), {db_port} (postgres)
+- First staging (staging): {odoo_port} (web), {gevent_port} (longpolling), {db_port} (postgres)
 - Additional stagings: Ports increment by 10 for each instance
   - staging-2: 8079, 8082, 5442
   - staging-3: 8089, 8092, 5452

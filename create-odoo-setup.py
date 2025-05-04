@@ -15,7 +15,7 @@ Configuration file format:
     odoo_port=8069
     db_port=5432
     db_user=odoo
-    odoo_db_name=acme
+    {odoo_db_name}=acme
     path_to_install=/opt
 """
 
@@ -33,6 +33,7 @@ FILES_TO_PROCESS = [
     "backup.sh",
     "staging.sh",
     "git_panel.sh",
+    "fix-permissions.sh",
     "config/odoo.conf",
     "README.md"
 ]
@@ -40,6 +41,7 @@ FILES_TO_PROCESS = [
 # Default configuration values
 DEFAULT_CONFIG = {
     'odoo_port': '8069',
+    'gevent_port': '8072',
     'db_port': '5432',
     'db_user': 'odoo',
     'path_to_install': '',  # Will use current directory if blank
@@ -178,10 +180,10 @@ def load_config(config_file):
         config['db_user'] = DEFAULT_CONFIG['db_user']
         print(f"Using default db_user: {config['db_user']}")
     
-    #Ensure odoo_db_name is set
-    if not config.get('odoo_db_name'):
-        config['odoo_db_name'] = config['client_name']
-        print(f"Using default odoo_db_name: {config['odoo_db_name']}")
+    #Ensure {odoo_db_name} is set
+    if not config.get('{odoo_db_name}'):
+        config['{odoo_db_name}'] = config['client_name']
+        print(f"Using default {odoo_db_name}: {config['{odoo_db_name}']}")
     
     # Print all configuration values for verification
     print("\nConfiguration values that will be used:")
@@ -245,12 +247,13 @@ def modify_file(file_path, config):
     content = content.replace('{client_name}', config['client_name'])
     content = content.replace('{client_password}', config['client_password'])
     content = content.replace('{odoo_port}', config['odoo_port'])
+    content = content.replace('{gevent_port}', config['gevent_port'])
     content = content.replace('{db_port}', config['db_port'])
     content = content.replace('{db_user}', config['db_user'])
     content = content.replace('{path_to_install}', config['path_to_install'])
     content = content.replace('{odoo_container_name}', config['odoo_container_name'])
     content = content.replace('{db_container_name}', config['db_container_name'])
-    content = content.replace('{odoo_db_name}', config['odoo_db_name'])
+    content = content.replace('{odoo_db_name}', config['{odoo_db_name}'])
     content = content.replace('{install_dir}', config['install_dir'])
 
     if 'ip' in config:
@@ -274,7 +277,7 @@ def modify_file(file_path, config):
         # Other shell script variables
         'level_color', 'http_code', 'TIMESTAMP', 'DB_NAME', 'docker_compose_file',
         'odoo_conf_file', 'file_name', 'container_name', 'module_name', 
-        'insertions', 'deletions'
+        'insertions', 'deletions', 'win_archive', 'win_target', 'INSTALL_DIR', 'enterprise_path', 'i'
     }
     
     # Check for any remaining unparsed placeholders
@@ -346,6 +349,7 @@ client_password=acme2025
 user=
 ip=
 odoo_port=8069
+gevent_port=8072
 db_port=5432
 db_user=odoo
 path_to_install=

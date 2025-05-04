@@ -58,20 +58,20 @@ fi
 # Constants
 INSTALL_DIR="/odoo17/{client_name}-odoo-17"
 STAGING_DIR="$INSTALL_DIR/staging"
-BASE_PORT=8069
-LONGPOLLING_PORT=8072
+BASE_PORT={odoo_port}
+LONGPOLLING_PORT={gevent_port}
 POSTGRES_PORT={db_port}
 PUBLIC_IP="{ip}"
 
 # Display staging banner
 show_banner() {
     echo -e "${BG_MAGENTA}${WHITE}${BOLD}"
-    echo "  ____  _             _             "
-    echo " / ___|| |_ __ _  ___(_)_ __   __ _ "
-    echo " \\___ \\| __/ _\` |/ __| | '_ \\ / _\` |"
-    echo "  ___) | || (_| | (__| | | | | (_| |"
-    echo " |____/ \\__\\__,_|\\___|_|_| |_|\\__, |"
-    echo "                              |___/ "
+    echo "  ____  _              _             "
+    echo " / ___|| |_ __ _  __ _(_)_ __   __ _ "
+    echo " \\___ \\| __/ _\` |/ _\` | | '_ \\ / _\` |"
+    echo "  ___) | || (_| | (_| | | | | | (_| |"
+    echo " |____/ \\__\\__,_|\\__, |_|_| |_|\\__, |"
+    echo "                 |___/         |___/ "
     echo -e "${RESET}"
     echo -e "${CYAN}${BOLD}Odoo Staging Environment Tool for {client_name}${RESET}"
     echo -e "${YELLOW}Property of Azor Data SL (Spain)${RESET}"
@@ -119,26 +119,35 @@ get_next_number() {
         max=1
     fi
     
-    # Check for numbered staging instances
-    docker ps -a --format '{{.Names}}' | grep "^odoo17-{client_name}-staging-[0-9]*$" | while read -r container; do
+    # Check for numbered staging instances using a temporary file to avoid subshell issues
+    container_list=$(mktemp)
+    docker ps -a --format '{{.Names}}' | grep "^odoo17-{client_name}-staging-[0-9]*$" > "$container_list"
+    
+    while read -r container; do
         num=$(echo "$container" | grep -o '[0-9]*$')
         if [ -n "$num" ] && [ "$num" -gt "$max" ]; then
             max=$num
         fi
-    done
+    done < "$container_list"
+    rm -f "$container_list"
     
-    # Clean up any orphaned directories
+    # Store the max number before cleaning up orphaned directories
+    next_num=$((max + 1))
+    
+    # Clean up any orphaned directories (redirect logging to stderr so it doesn't affect function output)
     for d in "$STAGING_DIR"/staging*; do
         if [ -d "$d" ]; then
             name=$(basename "$d")
             if ! docker ps -a --format '{{.Names}}' | grep -q "^odoo17-{client_name}-$name$"; then
-                log INFO "Cleaning up orphaned staging directory: ${YELLOW}$d${RESET}"
+                # Redirect log output to stderr
+                log INFO "Cleaning up orphaned staging directory: ${YELLOW}$d${RESET}" >&2
                 rm -rf "$d"
             fi
         fi
     done
     
-    echo $((max + 1))
+    # Return the next available number
+    echo "$next_num"
 }
 
 # Function to get staging name
@@ -172,17 +181,18 @@ get_ports() {
     while [ $attempt -lt $max_attempts ]; do
         offset=$(( (num + attempt) * 10 ))
         local web_port=$((BASE_PORT + offset))
+        local long_port=$((LONGPOLLING_PORT + offset))
         
-        # We only need to check web port since others aren't exposed
-        if check_port "$web_port"; then
-            echo "$web_port"
+        # Check both web port and longpolling port
+        if check_port "$web_port" && check_port "$long_port"; then
+            echo "$web_port $long_port"
             return 0
         fi
         
         attempt=$((attempt + 1))
     done
     
-    echo "Error: Could not find available web port after $max_attempts attempts"
+    echo "Error: Could not find available ports after $max_attempts attempts"
     return 1
 }
 
@@ -217,16 +227,23 @@ create_staging() {
         exit 1
     fi
     
-    # Get web port
+    # Get ports
+    local ports_result
     local web_port
-    web_port=$(get_ports "$num")
+    local long_port
+    
+    ports_result=$(get_ports "$num")
     if [ $? -ne 0 ]; then
-        log ERROR "$web_port"
+        log ERROR "$ports_result"
         exit 1
     fi
     
-    echo -e "${YELLOW}${BOLD}Allocated port:${RESET}"
+    # Parse ports result
+    read -r web_port long_port <<< "$ports_result"
+    
+    echo -e "${YELLOW}${BOLD}Allocated ports:${RESET}"
     echo -e "  ${GREEN}Web:${RESET} ${CYAN}$web_port${RESET}"
+    echo -e "  ${GREEN}Longpolling:${RESET} ${CYAN}$long_port${RESET}"
     
     # Create directory structure
     log INFO "Creating staging environment '${CYAN}$name${RESET}'..."
@@ -247,7 +264,7 @@ create_staging() {
     # Update odoo.conf
     log INFO "Configuring odoo.conf..."
     local config_file="$STAGING_DIR/$name/config/odoo.conf"
-    sed -i "s/^db_name =.*/db_name = postgres_{client_name}_$name/" "$config_file"
+    sed -i "s/^db_name =.*/db_name = {odoo_db_name}_$name/" "$config_file"
     
     # Update docker-compose.yml
     log INFO "Configuring docker-compose.yml..."
@@ -258,20 +275,28 @@ create_staging() {
     
     # Process the file line by line with proper structure
     while IFS= read -r line; do
-        if [[ $line == *":8069"* ]]; then
+        if [[ $line == *":{web_port}"* ]]; then
             # Map web port
             # Handle both formats: with or without 0.0.0.0
             if [[ $line == *"0.0.0.0:"* ]]; then
-                echo "      - \"0.0.0.0:$web_port:8069\"" >> "$temp_file"
+                echo "      - \"0.0.0.0:$web_port:{web_port}\"" >> "$temp_file"
             else
-                echo "      - \"$web_port:8069\"" >> "$temp_file"
+                echo "      - \"$web_port:{web_port}\"" >> "$temp_file"
+            fi
+        elif [[ $line == *":{gevent_port}"* ]]; then
+            # Map longpolling port
+            # Handle both formats: with or without 0.0.0.0
+            if [[ $line == *"0.0.0.0:"* ]]; then
+                echo "      - \"0.0.0.0:$long_port:{gevent_port}\"" >> "$temp_file"
+            else
+                echo "      - \"$long_port:{gevent_port}\"" >> "$temp_file"
             fi
         elif [[ $line == *"container_name: odoo17-{client_name}"* ]]; then
             echo "    container_name: odoo17-{client_name}-$name" >> "$temp_file"
         elif [[ $line == *"container_name: db-{client_name}"* ]]; then
             echo "    container_name: db-{client_name}-$name" >> "$temp_file"
-        elif [[ $line == *"POSTGRES_DB=postgres_{client_name}"* ]]; then
-            echo "      - POSTGRES_DB=postgres_{client_name}_$name" >> "$temp_file"
+        elif [[ $line == *"POSTGRES_DB={odoo_db_name}"* ]]; then
+            echo "      - POSTGRES_DB={odoo_db_name}_$name" >> "$temp_file"
         elif [[ $line == *"depends_on:"* ]]; then
             echo "    depends_on:" >> "$temp_file"
             read -r next_line
@@ -324,9 +349,9 @@ create_staging() {
     
     # Copy filestore with proper database name
     log INFO "Copying filestore..."
-    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
-    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/postgres_{client_name}/." \
-        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name/"; then
+    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/{odoo_db_name}_$name"
+    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/{odoo_db_name}/." \
+        "$STAGING_DIR/$name/volumes/odoo-data/filestore/{odoo_db_name}_$name/"; then
         log ERROR "Failed to copy filestore"
         docker start odoo17-{client_name}
         exit 1
@@ -339,26 +364,26 @@ create_staging() {
     # Simple direct database clone
     log INFO "Creating staging database..."
     # First drop the database if it exists (outside transaction)
-    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "DROP DATABASE IF EXISTS postgres_{client_name}_$name;" 2>/dev/null
+    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "DROP DATABASE IF EXISTS {odoo_db_name}_$name;" 2>/dev/null
     # Create empty database
-    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "CREATE DATABASE postgres_{client_name}_$name WITH TEMPLATE template0 OWNER odoo LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8';" 2>/dev/null
+    docker exec db-{client_name}-$name psql -U odoo -d template1 -q -c "CREATE DATABASE {odoo_db_name}_$name WITH TEMPLATE template0 OWNER odoo LC_COLLATE 'en_US.UTF-8' LC_CTYPE 'en_US.UTF-8';" 2>/dev/null
     
     # Now dump and restore
     log INFO "Restoring database (this may take a while)..."
-    if ! docker exec db-{client_name} pg_dump -U odoo -Fc -Z0 postgres_{client_name} > "/tmp/odoo_staging_$$.dump"; then
+    if ! docker exec db-{client_name} pg_dump -U odoo -Fc -Z0 {odoo_db_name} > "/tmp/odoo_staging_$$.dump"; then
         log ERROR "Failed to dump database"
         docker start odoo17-{client_name}
         rm -f "/tmp/odoo_staging_$$.dump"
         exit 1
     fi
     
-    if ! docker exec -i db-{client_name}-$name pg_restore -U odoo -d postgres_{client_name}_$name --no-owner --no-privileges --clean --if-exists < "/tmp/odoo_staging_$$.dump" 2>/dev/null; then
+    if ! docker exec -i db-{client_name}-$name pg_restore -U odoo -d {odoo_db_name}_$name --no-owner --no-privileges --clean --if-exists < "/tmp/odoo_staging_$$.dump" 2>/dev/null; then
         log WARNING "Some non-critical errors occurred during restore"
     fi
     rm -f "/tmp/odoo_staging_$$.dump"
     
     # Verify database was restored properly
-    if ! docker exec db-{client_name}-$name psql -U odoo -d postgres_{client_name}_$name -q -t -c "SELECT COUNT(*) FROM res_users;" 2>/dev/null | grep -q '[1-9]'; then
+    if ! docker exec db-{client_name}-$name psql -U odoo -d {odoo_db_name}_$name -q -t -c "SELECT COUNT(*) FROM res_users;" 2>/dev/null | grep -q '[1-9]'; then
         log ERROR "Database restore failed - database appears empty"
         docker start odoo17-{client_name}
         exit 1
@@ -379,10 +404,10 @@ create_staging() {
     # Now neutralize the database
     echo -e "${CYAN}${BOLD}=== Neutralizing database ===${RESET}"
     log INFO "Neutralizing database..."
-    docker exec odoo17-{client_name}-$name odoo neutralize --database postgres_{client_name}_$name
+    docker exec odoo17-{client_name}-$name odoo neutralize --database {odoo_db_name}_$name
 
     # Update base URL and configure ribbon (specific to our setup)
-    docker exec db-{client_name}-$name psql -U odoo postgres_{client_name}_$name << EOF
+    docker exec db-{client_name}-$name psql -U odoo {odoo_db_name}_$name << EOF
 BEGIN;
 
 -- Mark web_environment_ribbon for installation
@@ -396,17 +421,17 @@ EOF
 
     # Install ribbon module
     log INFO "Installing ribbon module..."
-    docker exec odoo17-{client_name}-$name odoo -d postgres_{client_name}_$name -i web_environment_ribbon --stop-after-init >/dev/null 2>&1
+    docker exec odoo17-{client_name}-$name odoo -d {odoo_db_name}_$name -i web_environment_ribbon --stop-after-init >/dev/null 2>&1
 
     # Configure ribbon after installation
     log INFO "Configuring ribbon..."
-    docker exec db-{client_name}-staging psql -U odoo -d postgres_{client_name}_$name -c "UPDATE ir_config_parameter 
+    docker exec db-{client_name}-staging psql -U odoo -d {odoo_db_name}_$name -c "UPDATE ir_config_parameter 
 SET value = REPEAT('=', (23 - LENGTH('$name'))/2+1) || '⚠️ ' || UPPER('$name') || ' ⚠️.. NOT FOR PRODUCTION' || REPEAT('=', (23 - LENGTH('$name'))/2)
 WHERE key = 'ribbon.name';" >/dev/null 2>&1
 
     # Update module to apply configuration
     log INFO "Update ribbon module..."
-    docker exec odoo17-{client_name}-$name odoo -d postgres_{client_name}_$name -u web_environment_ribbon --stop-after-init >/dev/null 2>&1
+    docker exec odoo17-{client_name}-$name odoo -d {odoo_db_name}_$name -u web_environment_ribbon --stop-after-init >/dev/null 2>&1
 
     # Restart to ensure clean state
     log INFO "Restarting service..."
@@ -416,7 +441,7 @@ WHERE key = 'ribbon.name';" >/dev/null 2>&1
     echo -e "${BG_GREEN}${BLACK}${BOLD} STAGING ENVIRONMENT CREATED SUCCESSFULLY ${RESET}"
     echo -e "  ${GREEN}Path:${RESET} ${YELLOW}$STAGING_DIR/$name${RESET}"
     echo -e "  ${GREEN}Web port:${RESET} ${CYAN}$web_port${RESET} (${UNDERLINE}http://$PUBLIC_IP:$web_port${RESET})"
-    echo -e "  ${GREEN}Database:${RESET} ${YELLOW}postgres_{client_name}_$name${RESET}"
+    echo -e "  ${GREEN}Database:${RESET} ${YELLOW}{odoo_db_name}_$name${RESET}"
     echo -e "  ${GREEN}Status:${RESET} ${GREEN}Running${RESET}"
 }
 
@@ -581,12 +606,12 @@ update_staging() {
     sed -i "s/:$POSTGRES_PORT\"/:$pg_port\"/g" "$compose_file"
     sed -i "s/container_name: odoo17-{client_name}/container_name: odoo17-{client_name}-$name/g" "$compose_file"
     sed -i "s/container_name: db-{client_name}/container_name: db-{client_name}-$name/g" "$compose_file"
-    sed -i "s/POSTGRES_DB=postgres_{client_name}/POSTGRES_DB=postgres_{client_name}_$name/g" "$compose_file"
-    sed -i "s/PGDATABASE={odoo_db_name}/PGDATABASE=postgres_{client_name}_$name/g" "$compose_file"
+    sed -i "s/POSTGRES_DB={odoo_db_name}/POSTGRES_DB={odoo_db_name}_$name/g" "$compose_file"
+    sed -i "s/PGDATABASE={odoo_db_name}/PGDATABASE={odoo_db_name}_$name/g" "$compose_file"
     
     # Update base URL and report URL
     log INFO "Updating database parameters..."
-    docker exec db-{client_name}-$name psql -U odoo postgres_{client_name}_$name << EOF
+    docker exec db-{client_name}-$name psql -U odoo {odoo_db_name}_$name << EOF
 BEGIN;
 
 -- Update base URL and report URL
@@ -606,13 +631,13 @@ EOF
     
     # Clear and recreate filestore directory for clean sync
     log INFO "Clearing and recreating filestore directory..."
-    rm -rf "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
-    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name"
+    rm -rf "$STAGING_DIR/$name/volumes/odoo-data/filestore/{odoo_db_name}_$name"
+    mkdir -p "$STAGING_DIR/$name/volumes/odoo-data/filestore/{odoo_db_name}_$name"
     
     # Copy updated filestore
     log INFO "Copying updated filestore..."
-    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/postgres_{client_name}/." \
-        "$STAGING_DIR/$name/volumes/odoo-data/filestore/postgres_{client_name}_$name/"; then
+    if ! docker cp "odoo17-{client_name}:/var/lib/odoo/filestore/{odoo_db_name}/." \
+        "$STAGING_DIR/$name/volumes/odoo-data/filestore/{odoo_db_name}_$name/"; then
         log WARNING "Failed to sync filestore"
     fi
     
@@ -648,8 +673,8 @@ cleanup_staging() {
         
         # Stop and remove all staging containers
         log INFO "Stopping and removing staging containers..."
-        if docker ps -a | grep -q "vissecapital-staging"; then
-            docker ps -a | grep "vissecapital-staging" | awk '{print $1}' | xargs -r docker rm -f
+        if docker ps -a | grep -q "{odoo_db_name}-staging"; then
+            docker ps -a | grep "{odoo_db_name}-staging" | awk '{print $1}' | xargs -r docker rm -f
         else
             log INFO "No staging containers found."
         fi
@@ -702,8 +727,8 @@ cleanup_staging() {
         
         # Stop and remove containers
         log INFO "Stopping and removing containers..."
-        if docker ps -a | grep -q "vissecapital-$name\$"; then
-            docker ps -a | grep "vissecapital-$name\$" | awk '{print $1}' | xargs -r docker rm -f
+        if docker ps -a | grep -q "{odoo_db_name}-$name\$"; then
+            docker ps -a | grep "{odoo_db_name}-$name\$" | awk '{print $1}' | xargs -r docker rm -f
         else
             log INFO "No containers found for staging '${YELLOW}$name${RESET}'."
         fi

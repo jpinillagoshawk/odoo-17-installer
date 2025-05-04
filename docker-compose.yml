@@ -5,8 +5,8 @@ services:
     depends_on:
       - db
     ports:
-      - "0.0.0.0:{odoo_port}:8069"
-      - "0.0.0.0:8072:8072"
+      - "0.0.0.0:{odoo_port}:{odoo_port}"
+      - "0.0.0.0:{gevent_port}:{gevent_port}"
     volumes:
       - ./config:/etc/odoo
       - ./volumes/odoo-data:/var/lib/odoo
@@ -14,7 +14,7 @@ services:
       - ./addons:/mnt/extra-addons
       - ./logs:/var/log/odoo
     entrypoint: []
-    command: ["/usr/bin/odoo", "--workers=0", "--db_host=db", "--db_port={db_port}", "--db_user={db_user}", "--db_password={client_password}", "--database={odoo_db_name}", "--http-interface=0.0.0.0", "--gevent-port=8072", "--max-cron-threads=1"]
+    command: ["/usr/bin/odoo", "--workers=0", "--db_host=db", "--db_port={db_port}", "--db_user={db_user}", "--db_password={client_password}", "--database={odoo_db_name}", "--http-interface=0.0.0.0", "--gevent-port={gevent_port}", "--max-cron-threads=1"]
     environment:
       - HOST=db
       - PORT={db_port}

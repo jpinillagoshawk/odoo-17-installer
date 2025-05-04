@@ -35,7 +35,7 @@ The following variables are used in the template files:
 | `odoo_port` | Odoo web port | 8069 |
 | `db_port` | PostgreSQL port | 5432 |
 | `db_user` | Database username | odoo |
-| `odoo_db_name` | Odoo database name | Same as client_name |
+| `{odoo_db_name}` | Odoo database name | Same as client_name |
 | `path_to_install` | Target installation directory | Current directory |
 | `user` | Server username | Auto-detected |
 | `ip` | Server IP address | Auto-detected |

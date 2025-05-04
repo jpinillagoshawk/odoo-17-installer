@@ -104,6 +104,7 @@ usage() {
     echo -e "  ${CYAN}restore${RESET} ${GREEN}[backup_file]${RESET}   - Restore from a backup file"
     echo -e "                           If no file specified, shows interactive selection"
     echo -e "  ${CYAN}list${RESET}                    - List available backups with interactive restore option"
+    echo -e "  ${CYAN}fix-permissions${RESET}         - Fix filestore permissions for database operations"
     exit 1
 }
 
@@ -511,12 +512,30 @@ restore_backup() {
     
     # Step 7: CRITICAL - Set correct permissions
     log INFO "Setting correct permissions on filestore..."
-    # Apply ownership recursively
-    chown -R "$odoo_uid:$odoo_gid" "$host_filestore_path"
-    # Apply directory permissions
-    find "$host_filestore_path" -type d -exec chmod 755 {} \;
-    # Apply file permissions
-    find "$host_filestore_path" -type f -exec chmod 644 {} \;
+    
+    # Check if this is a Windows environment
+    if [[ "$(uname -s)" == *"MINGW"* ]] || [[ "$(uname -s)" == *"MSYS"* ]] || [[ "$(uname -s)" == *"CYGWIN"* ]]; then
+        log INFO "Windows environment detected - using Docker to set permissions"
+        # First start the odoo container if not already running
+        if ! docker ps | grep -q "$odoo_container"; then
+            log INFO "Starting Odoo container to handle permissions..."
+            docker compose start web || true
+            sleep 5
+        fi
+        
+        # Use the container to set permissions (this works reliably on Windows)
+        docker exec "$odoo_container" bash -c "chmod -R 777 /var/lib/odoo/filestore && chown -R odoo:odoo /var/lib/odoo/filestore" || {
+            log WARNING "Container permission setting failed, will continue with host permissions"
+        }
+    else
+        # On Linux/macOS, we can set permissions directly
+        # Apply ownership recursively
+        chown -R "$odoo_uid:$odoo_gid" "$host_filestore_path" 2>/dev/null || log WARNING "Could not set ownership for filestore directory"
+        
+        # Use more permissive 777 permissions for more reliable operation
+        chmod -R 777 "$host_filestore_path" 2>/dev/null || log WARNING "Could not set permissions for filestore directory"
+    fi
+    
     log SUCCESS "Permissions set correctly"
     
     # Step 8: DO NOT MODIFY DATABASE - Skip the UPDATE ir_attachment SET store_fname = NULL
@@ -528,39 +547,9 @@ restore_backup() {
     log INFO "Waiting for Odoo to initialize (30s)..."
     sleep 30
     
-    # Step 10: Clear filesystem asset cache
-    log INFO "Clearing filesystem asset cache..."
-    local odoo_assets_path="$INSTALL_DIR/volumes/odoo-data/.local/share/Odoo/assets"
-    rm -rf "${odoo_assets_path:?}/"*
+    # Step 10-11: Removed asset regeneration steps to simplify restore process
     
-    # Get container names for both Odoo and database
-    local odoo_container=$(docker ps --format '{{.Names}}' | grep -E 'odoo|web' | head -1)
-    
-    # Also clear internal container asset cache if container exists
-    if [ -n "$odoo_container" ]; then
-        log INFO "Clearing internal Odoo asset cache in container: ${YELLOW}$odoo_container${RESET}"
-        docker exec "$odoo_container" rm -rf /var/lib/odoo/.local/share/Odoo/assets/* 2>/dev/null || true
-    fi
-    
-    # Step 11: Trigger asset regeneration
-    log INFO "Triggering asset regeneration as Odoo user..."
-    if [ -n "$odoo_container" ]; then
-        docker exec -u "$odoo_uid" "$odoo_container" odoo --database="$DB_NAME" --update=base --stop-after-init --workers=0 &>/dev/null || {
-            log WARNING "Asset regeneration command failed, but continuing..."
-        }
-        
-        # Ensure Odoo service is running
-        log INFO "Ensuring Odoo service is running..."
-        docker compose start web
-        sleep 5
-    else
-        log WARNING "Could not find Odoo container to trigger asset regeneration"
-    fi
-    
-    # Step 12: Clear browser cache & test - informational message
-    log INFO "Manual step required: Clear browser cache thoroughly and check icons/images"
-    
-    # Step 13: Cleanup
+    # Step 12: Cleanup
     log INFO "Cleaning up temporary directory..."
     rm -rf "$temp_dir"
     
@@ -650,6 +639,53 @@ list_backups() {
     done
 }
 
+# Function to fix filestore permissions
+fix_filestore_permissions() {
+    local odoo_container_name
+    
+    echo -e "${BG_CYAN}${WHITE}${BOLD} FIXING FILESTORE PERMISSIONS ${RESET}"
+    log INFO "This will fix permissions needed for database operations (backup/restore)"
+    
+    # Get container name
+    odoo_container_name=$(docker ps --format '{{.Names}}' | grep -E 'odoo|web' | head -1)
+    
+    if [ -z "$odoo_container_name" ]; then
+        log WARNING "Odoo container not found. Starting containers..."
+        cd "$INSTALL_DIR"
+        docker compose up -d
+        sleep 5
+        odoo_container_name=$(docker ps --format '{{.Names}}' | grep -E 'odoo|web' | head -1)
+    fi
+    
+    if [ -z "$odoo_container_name" ]; then
+        log ERROR "Could not find or start Odoo container"
+        return 1
+    fi
+    
+    local host_filestore_path="$INSTALL_DIR/volumes/odoo-data/filestore"
+    
+    # Check if this is a Windows environment
+    if [[ "$(uname -s)" == *"MINGW"* ]] || [[ "$(uname -s)" == *"MSYS"* ]] || [[ "$(uname -s)" == *"CYGWIN"* ]]; then
+        log INFO "Windows environment detected - using Docker to set permissions"
+        
+        # Use the container to set permissions (this works reliably on Windows)
+        log INFO "Fixing permissions via Docker container..."
+        docker exec "$odoo_container_name" bash -c "mkdir -p /var/lib/odoo/filestore && chmod -R 777 /var/lib/odoo/filestore && chown -R odoo:odoo /var/lib/odoo/filestore" || {
+            log ERROR "Failed to set permissions through container"
+            return 1
+        }
+    else
+        # On Linux/macOS, we can set permissions directly
+        log INFO "Setting permissions directly on host..."
+        mkdir -p "$host_filestore_path"
+        chmod -R 777 "$host_filestore_path" 2>/dev/null || log WARNING "Could not set permissions for filestore directory"
+        chown -R 101:101 "$host_filestore_path" 2>/dev/null || log WARNING "Could not set ownership for filestore directory"
+    fi
+    
+    log SUCCESS "Filestore permissions fixed successfully"
+    return 0
+}
+
 # Main script
 show_banner
 
@@ -666,6 +702,9 @@ case "$1" in
         ;;
     list)
         list_backups
+        ;;
+    fix-permissions)
+        fix_filestore_permissions
         ;;
     *)
         usage
