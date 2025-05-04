@@ -80,13 +80,12 @@ DB_PORT="{db_port}"
 # Display banner
 show_banner() {
     echo -e "${BG_BLUE}${WHITE}${BOLD}"
-    echo "  ___                          ___    ___   " && \
-    echo " / _ \      _                 /   |  / _ \\ " && \
-    echo "| | | |  __| |  ___    ___   /_/| | | (_) | " && \
-    echo "| | | | / _\` | / _ \  / _ \     | | |  _  | " && \
-    echo "| |_| || (_| || (_) || (_) |    | | | (_) | " && \
-    echo " \___/  \__,_| \___/  \___/     |_|  \\___/ " && \
-    echo "                                            " && \
+    echo "  ___       _                   _  ______ " && \
+    echo " / _ \   __| |  ___    ___     / ||____ / " && \
+    echo "| | | | / _\` | / _ \  / _ \   / /    / /  " && \
+    echo "| |_| || (_| || (_) || (_) | / /    / /   " && \
+    echo " \___/  \__,_| \___/  \___/ /_/    /_/    " && \
+    echo "                                          "
     echo -e "${RESET}"
     echo -e "${CYAN}${BOLD}Installation Script for {client_name}${RESET}"
     echo -e "${YELLOW}Property of Azor Data SL (Spain)${RESET}"
