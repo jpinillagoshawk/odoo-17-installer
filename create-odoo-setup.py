@@ -15,7 +15,7 @@ Configuration file format:
     odoo_port=8069
     db_port=5432
     db_user=odoo
-    {odoo_db_name}=acme
+    odoo_db_name=acme
     path_to_install=/opt
 """
 
@@ -180,10 +180,10 @@ def load_config(config_file):
         config['db_user'] = DEFAULT_CONFIG['db_user']
         print(f"Using default db_user: {config['db_user']}")
     
-    #Ensure {odoo_db_name} is set
-    if not config.get('{odoo_db_name}'):
-        config['{odoo_db_name}'] = config['client_name']
-        print(f"Using default {odoo_db_name}: {config['{odoo_db_name}']}")
+    #Ensure odoo_db_name is set
+    if not config.get('odoo_db_name'):
+        config['odoo_db_name'] = config['client_name']
+        print(f"Using default odoo_db_name: {config['odoo_db_name']}")
     
     # Print all configuration values for verification
     print("\nConfiguration values that will be used:")
@@ -253,7 +253,7 @@ def modify_file(file_path, config):
     content = content.replace('{path_to_install}', config['path_to_install'])
     content = content.replace('{odoo_container_name}', config['odoo_container_name'])
     content = content.replace('{db_container_name}', config['db_container_name'])
-    content = content.replace('{odoo_db_name}', config['{odoo_db_name}'])
+    content = content.replace('odoo_db_name', config['odoo_db_name'])
     content = content.replace('{install_dir}', config['install_dir'])
 
     if 'ip' in config:
@@ -313,9 +313,9 @@ db_host = db
 db_port = {db_port}
 db_user = {db_user}
 db_password = {client_password}
-db_name = {odoo_db_name}
-dbfilter = {odoo_db_name}
-database = {odoo_db_name}
+db_name = odoo_db_name
+dbfilter = odoo_db_name
+database = odoo_db_name
 addons_path = /mnt/enterprise,/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
 data_dir = /var/lib/odoo
 session_dir = /var/lib/odoo/sessions
